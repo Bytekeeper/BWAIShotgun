@@ -1,0 +1,7 @@
+# Map path
+map = 'C:\Something\StarCraft\map\SomeMap.scm'
+
+# Game Type
+# Only Melee is supported currently, it takes a list of bots that should play and their respective name and race override
+# Ie. - this will run 'TheBot' 2 times, once it will play as terran, the second instance will play using the bots preferred race
+game_type = { Melee = [{name = "TheBot", race = "Terran"}, {name = "TheBot"}] }

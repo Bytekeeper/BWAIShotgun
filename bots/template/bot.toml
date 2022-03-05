@@ -1,0 +1,7 @@
+# Mandatory: One of the following:
+#race="Terran"
+#race="Protoss"
+#race="Zerg"
+
+# Path of bot executable
+#executable='bwapi-data\AI\ExampleAIModule.dll'
