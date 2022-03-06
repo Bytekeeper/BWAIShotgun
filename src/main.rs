@@ -1,11 +1,15 @@
-use anyhow::bail;
+use anyhow::{anyhow, bail};
+use std::borrow::Borrow;
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fmt::{Debug, Display, Formatter};
 use std::fs::{create_dir_all, metadata, read, read_dir, File};
 use std::io::Write;
+use std::net::Shutdown::Both;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
 use registry::{Hive, Security};
 use serde::de::Unexpected;
@@ -15,6 +19,7 @@ use toml::toml;
 #[derive(Deserialize, Debug, Default)]
 struct ShotgunConfig {
     starcraft_path: Option<String>,
+    java_path: Option<String>,
 }
 
 impl ShotgunConfig {
@@ -115,10 +120,10 @@ impl Display for Race {
             f,
             "{}",
             match self {
-                Race::Protoss => "p",
-                Race::Terran => "t",
-                Race::Zerg => "z",
-                Race::Random => "r",
+                Race::Protoss => "Protoss",
+                Race::Terran => "Terran",
+                Race::Zerg => "Zerg",
+                Race::Random => "Random",
             }
         )
     }
@@ -242,37 +247,114 @@ fn base_folder() -> PathBuf {
         .to_owned()
 }
 
-fn search_bot_executable(ai_path: &Path) -> anyhow::Result<PathBuf> {
-    enum Binary {
-        None,
-        Dll(PathBuf),
-        Jar(PathBuf),
-        Exe(PathBuf),
+#[derive(Debug)]
+enum Binary {
+    Dll(PathBuf),
+    Jar(PathBuf),
+    Exe(PathBuf),
+}
+
+impl Binary {
+    fn from_path(path: &Path) -> Option<Self> {
+        path.extension()
+            .map(|ext| ext.to_str())
+            .flatten()
+            .map(|ext| {
+                let mut ext = ext.to_string();
+                ext.make_ascii_lowercase();
+                let result = match ext.as_str() {
+                    "dll" => Binary::Dll(path.to_path_buf()),
+                    "jar" => Binary::Jar(path.to_path_buf()),
+                    "exe" => Binary::Exe(path.to_path_buf()),
+                    _ => return None,
+                };
+                Some(result)
+            })
+            .flatten()
     }
-    let mut executable: Binary = Binary::None;
-    for file in read_dir(ai_path)?.flatten() {
-        let path = file.path();
-        if let Some(ext) = path.extension().map(|ext| ext.to_str()).flatten() {
-            let mut ext = ext.to_string();
-            ext.make_ascii_lowercase();
-            executable = match executable {
-                Binary::None if ext == "dll" => Binary::Dll(path.to_path_buf()),
-                Binary::None if ext == "jar" => Binary::Jar(path.to_path_buf()),
-                Binary::None if ext == "exe" => Binary::Exe(path.to_path_buf()),
-                Binary::Dll(_) | Binary::Jar(_) if ext == "exe" => Binary::Exe(path.to_path_buf()),
-                Binary::Dll(_) if ext == "jar" => Binary::Jar(path.to_path_buf()),
-                _ => bail!(SGError::MultipleExecutables(ai_path.to_path_buf())),
+
+    fn search(search_path: &Path) -> anyhow::Result<Self> {
+        let mut executable = None;
+        for file in read_dir(search_path)?.flatten() {
+            let path = file.path();
+            if let Some(detected_binary) = Binary::from_path(&path) {
+                executable = Some(match (executable, detected_binary) {
+                    (None, dll @ Binary::Dll(_)) | (Some(dll @ Binary::Dll(_)), Binary::Jar(_)) => {
+                        dll
+                    }
+                    (None, jar @ Binary::Jar(_)) => jar,
+                    (None, exe @ Binary::Exe(_))
+                    | (Some(Binary::Dll(_) | Binary::Jar(_)), exe @ Binary::Exe(_)) => exe,
+                    _ => bail!(SGError::MultipleExecutables(search_path.to_path_buf())),
+                })
             }
         }
+        match executable {
+            None => bail!(SGError::ExecutableNotFound(search_path.to_path_buf())),
+            Some(x) => Ok(x),
+        }
     }
-    match executable {
-        Binary::None => bail!(SGError::ExecutableNotFound(ai_path.to_path_buf())),
-        Binary::Dll(x) | Binary::Jar(x) | Binary::Exe(x) => Ok(x),
+}
+
+pub struct BotProcess {
+    bwheadless: Child,
+    bot: Option<Child>,
+}
+
+#[derive(Debug)]
+pub struct PreparedBot {
+    binary: Binary,
+    race: Race,
+    name: String,
+    bwapi_dll: PathBuf,
+    working_dir: PathBuf,
+}
+
+impl PreparedBot {
+    fn prepare(config: &BotConfig, path: &Path, definition: &BotDefinition) -> Self {
+        let bwapi_data_path = path.join("bwapi-data");
+        // Workaround BWAPI 3.7.x "strangeness" of removing ":" ...
+        let mut ai_module_path = bwapi_data_path.components();
+        ai_module_path.next();
+        let ai_module_path = ai_module_path.as_path().join("AI");
+        let read_path = bwapi_data_path.join("read");
+        let write_path = bwapi_data_path.join("write");
+        let bwapi_ini_path = bwapi_data_path.join("bwapi.ini");
+        create_dir_all(read_path).expect("Could not create read folder");
+        create_dir_all(write_path).expect("Could not create write folder");
+        let mut bwapi_ini = File::create(bwapi_ini_path).expect("Could not create 'bwapi.ini'");
+
+        let mut bot_binary = definition
+            .executable
+            .as_deref()
+            .map(|s| Binary::from_path(Path::new(s)))
+            .flatten()
+            .unwrap_or_else(|| {
+                Binary::search(ai_module_path.as_path())
+                    .expect("Could not find bot binary in 'bwapi-data/AI'")
+            });
+        BwapiIni {
+            ai: match &bot_binary {
+                Binary::Dll(x) => x.to_string_lossy().to_string(),
+                Binary::Exe(_) | Binary::Jar(_) => "".to_string(),
+            },
+        }
+        .write(&mut bwapi_ini)
+        .expect("Could not write 'bwapi.ini'");
+        drop(bwapi_ini);
+
+        Self {
+            binary: bot_binary,
+            race: config.race.unwrap_or(definition.race),
+            name: config.player_name.clone().unwrap_or(config.name.clone()),
+            bwapi_dll: bwapi_data_path.join("BWAPI.dll"),
+            working_dir: path.to_path_buf(),
+        }
     }
 }
 
 fn main() {
-    let config: ShotgunConfig = read("shotgun.toml")
+    let config: ShotgunConfig = read(base_folder().join("shotgun.toml"))
         .map(|cfg| {
             toml::from_slice(cfg.as_slice())
                 .map_err(|e| e.to_string())
@@ -336,32 +418,19 @@ fn main() {
                 .collect();
             let mut host = false;
             let player_count = bots.len();
-            let mut instances = vec![];
-            for (config, path, definition) in bots {
-                let bwapi_data_path = path.join("bwapi-data");
-                let read_path = bwapi_data_path.join("read");
-                let write_path = bwapi_data_path.join("write");
-                let bwapi_ini_path = bwapi_data_path.join("bwapi.ini");
-                create_dir_all(bwapi_data_path).expect("Could not create bwapi-data folder");
-                create_dir_all(read_path).expect("Could not create read folder");
-                create_dir_all(write_path).expect("Could not create write folder");
-                let mut bwapi_ini =
-                    File::create(bwapi_ini_path).expect("Could not create 'bwapi.ini'");
-                // Workaround BWAPI 3.7.x "strangeness" of removing ":" ...
-                let mut path = path.components();
-                path.next();
-                let path = path.as_path();
-                BwapiIni {
-                    ai: definition.executable.unwrap_or_else(|| {
-                        search_bot_executable(path.join("AI").as_path())
-                            .map(|p| p.to_str().expect("Could not retrieve path").to_string())
-                            .expect("Could not find bot executable")
-                    }),
+            let mut prepared_bots: Vec<_> = bots
+                .iter()
+                .map(|(config, path, definition)| PreparedBot::prepare(config, &path, &definition))
+                .collect();
+            prepared_bots.sort_by_key(|bot| {
+                if matches!(bot.binary, Binary::Dll(_)) {
+                    1
+                } else {
+                    0
                 }
-                .write(&mut bwapi_ini)
-                .expect("Could not write 'bwapi.ini'");
-                drop(bwapi_ini);
-
+            });
+            let mut instances = vec![];
+            for bot in prepared_bots {
                 let mut cmd = if !host {
                     host = true;
                     bwheadless.host_command(
@@ -375,26 +444,65 @@ fn main() {
                 .expect("Could not execute bwheadless");
                 BwHeadless::add_bot_args(
                     &mut cmd,
-                    config.race.unwrap_or(definition.race),
-                    config
-                        .player_name
-                        .as_deref()
-                        .unwrap_or(config.name.as_str()),
-                    path.join("BWAPI.dll")
-                        .to_str()
-                        .expect("Could not find path to BWAPI.dll"),
-                    path.to_str()
-                        .expect("Could not find path to bot config (bwapi.ini)"),
+                    bot.race,
+                    &bot.name,
+                    bot.bwapi_dll.to_string_lossy().deref(),
+                    bot.working_dir.to_string_lossy().deref(),
                 );
-                println!("Firing up {}", config.name);
-                instances.push(cmd.spawn().expect(
-                    "Could not run bwheadless (maybe deleted/blocked by a Virus Scanner?)",
-                ));
+                println!("Firing up {}", bot.name);
+                let bwheadless = cmd
+                    .spawn()
+                    .expect("Could not run bwheadless (maybe deleted/blocked by a Virus Scanner?)");
+
+                let mut bot_process = None;
+                match bot.binary {
+                    Binary::Dll(_) => (), // Loaded by BWAPI
+                    Binary::Jar(jar) => {
+                        let mut cmd =
+                            Command::new(config.java_path.as_deref().unwrap_or("java.exe"));
+                        cmd.current_dir(Path::new(bot.working_dir.to_string_lossy().deref()));
+                        cmd.arg("-jar").arg(jar);
+
+                        bot_process = Some(cmd.spawn().expect("Could not execute bot binary"));
+
+                        // Wait for a short moment to allow Server <-> Client connection - wait a bit longer than for exe bots
+                        // TODO : Connect to slots table instead!
+                        std::thread::sleep(Duration::from_millis(3000));
+                    }
+                    Binary::Exe(exe) => {
+                        let mut cmd = Command::new(exe);
+                        cmd.current_dir(Path::new(bot.working_dir.to_string_lossy().deref()));
+
+                        bot_process = Some(cmd.spawn().expect("Could not execute bot binary"));
+
+                        // Wait for a short moment to allow Server <-> Client connection - should be pretty fast for exe bots
+                        // TODO : Connect to slots table instead!
+                        std::thread::sleep(Duration::from_millis(1000));
+                    }
+                }
+                // TODO: Redirect stderr to stdout - bwheadless is very silent for a typical command prompt
+                instances.push(BotProcess {
+                    bwheadless,
+                    bot: bot_process,
+                });
             }
-            for mut instance in instances {
-                instance
-                    .wait()
-                    .expect("Failed to wait on bwheadless instance");
+            // Clean up a bit, kill Client bots to prevent them from spamming the slot table
+            // They will also print "Client And Server are not compatible" - if different versions of BWAPI are running with multiple clients
+            while !instances.is_empty() {
+                for i in (0..instances.len()).rev() {
+                    let BotProcess {
+                        ref mut bwheadless,
+                        ref mut bot,
+                    } = instances[i];
+                    let remove = matches!(bwheadless.try_wait(), Ok(Some(_)));
+                    if remove {
+                        if let Some(ref mut bot) = bot {
+                            bot.kill().ok();
+                        }
+                        instances.swap_remove(i);
+                    }
+                }
+                std::thread::sleep(Duration::from_secs(1));
             }
         }
     }

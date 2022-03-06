@@ -1,2 +1,5 @@
 # Starcraft path (where StarCraft.exe is located) - if unset, looks for an installed Starcraft
 starcraft_path = 'C:\...\StarCraft'
+
+# Java executable to use for java bots
+# java_path = '...\java.exe'

@@ -3,5 +3,5 @@
 #race="Protoss"
 #race="Zerg"
 
-# Path of bot executable
+# Path of bot executable (if not automatically detected)
 #executable='bwapi-data\AI\ExampleAIModule.dll'
