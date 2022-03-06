@@ -1,20 +1,21 @@
-use anyhow::{anyhow, bail};
-use std::borrow::Borrow;
+mod bwapi;
+
+use anyhow::bail;
 use std::error::Error;
-use std::ffi::OsStr;
 use std::fmt::{Debug, Display, Formatter};
 use std::fs::{create_dir_all, metadata, read, read_dir, File};
 use std::io::Write;
-use std::net::Shutdown::Both;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
 use std::time::Duration;
 
+use crate::bwapi::GameTableAccess;
 use registry::{Hive, Security};
+use retry::delay::Fixed;
+use retry::retry;
 use serde::de::Unexpected;
 use serde::{Deserialize, Deserializer};
-use toml::toml;
 
 #[derive(Deserialize, Debug, Default)]
 struct ShotgunConfig {
@@ -69,12 +70,10 @@ impl GameConfig {
             return Err("Missing map name".to_owned());
         }
         let map_path_abs = Path::new(&result.map);
-        let map_path_rel = PathBuf::from(
-            config
-                .get_starcraft_path()
-                .expect("Could not find StarCraft installation"),
-        )
-        .join(&result.map);
+        let map_path_rel = config
+            .get_starcraft_path()
+            .expect("Could not find StarCraft installation")
+            .join(&result.map);
         if map_path_abs.is_absolute() && !map_path_abs.exists() | !map_path_rel.exists() {
             return Err(format!("Could not find map '{}'", result.map));
         }
@@ -257,9 +256,8 @@ enum Binary {
 impl Binary {
     fn from_path(path: &Path) -> Option<Self> {
         path.extension()
-            .map(|ext| ext.to_str())
-            .flatten()
-            .map(|ext| {
+            .and_then(|ext| ext.to_str())
+            .and_then(|ext| {
                 let mut ext = ext.to_string();
                 ext.make_ascii_lowercase();
                 let result = match ext.as_str() {
@@ -270,7 +268,6 @@ impl Binary {
                 };
                 Some(result)
             })
-            .flatten()
     }
 
     fn search(search_path: &Path) -> anyhow::Result<Self> {
@@ -324,11 +321,10 @@ impl PreparedBot {
         create_dir_all(write_path).expect("Could not create write folder");
         let mut bwapi_ini = File::create(bwapi_ini_path).expect("Could not create 'bwapi.ini'");
 
-        let mut bot_binary = definition
+        let bot_binary = definition
             .executable
             .as_deref()
-            .map(|s| Binary::from_path(Path::new(s)))
-            .flatten()
+            .and_then(|s| Binary::from_path(Path::new(s)))
             .unwrap_or_else(|| {
                 Binary::search(ai_module_path.as_path())
                     .expect("Could not find bot binary in 'bwapi-data/AI'")
@@ -346,7 +342,10 @@ impl PreparedBot {
         Self {
             binary: bot_binary,
             race: config.race.unwrap_or(definition.race),
-            name: config.player_name.clone().unwrap_or(config.name.clone()),
+            name: config
+                .player_name
+                .clone()
+                .unwrap_or_else(|| config.name.clone()),
             bwapi_dll: bwapi_data_path.join("BWAPI.dll"),
             working_dir: path.to_path_buf(),
         }
@@ -383,6 +382,20 @@ fn main() {
     } else {
         eprintln!("Could not find 'SNP_DirectIP.snp' in your StarCraft installation, please copy the provided one or install BWAPI.");
     }
+
+    let mut game_table_access = GameTableAccess::new();
+    for server_process_id in game_table_access
+        .get_game_table()
+        .iter()
+        .flat_map(|table| table.game_instances.iter())
+        .map(|it| it.server_process_id)
+    {
+        eprintln!(
+            "The process {} is in the game table already and will interfere with game creation.",
+            server_process_id
+        );
+    }
+
     match game_config.game_type {
         GameType::Melee(bots) => {
             let bots: Vec<_> = bots
@@ -393,7 +406,7 @@ fn main() {
                     bot_folder.push(&cfg.name);
                     let bot_definition = toml::from_slice::<BotDefinition>(
                         read(bot_folder.join("bot.toml"))
-                            .map_err(|e| {
+                            .map_err(|_| {
                                 format!(
                                     "Could not read 'bot.toml' for bot '{}' in: '{}'",
                                     cfg.name,
@@ -406,9 +419,9 @@ fn main() {
                     .map_err(|e| e.to_string())
                     .expect("Could not read 'bot.toml'");
                     if let Some(race) = &cfg.race {
-                        if &bot_definition.race != &Race::Random && &bot_definition.race != race {
+                        if bot_definition.race != Race::Random && &bot_definition.race != race {
                             eprintln!(
-                                "Bot '{}' is configured to play as {}, but supports {} only!",
+                                "Bot '{}' is configured to play as {}, but its default race is {}!",
                                 cfg.name, race, bot_definition.race
                             );
                         }
@@ -420,7 +433,7 @@ fn main() {
             let player_count = bots.len();
             let mut prepared_bots: Vec<_> = bots
                 .iter()
-                .map(|(config, path, definition)| PreparedBot::prepare(config, &path, &definition))
+                .map(|(config, path, definition)| PreparedBot::prepare(config, path, definition))
                 .collect();
             prepared_bots.sort_by_key(|bot| {
                 if matches!(bot.binary, Binary::Dll(_)) {
@@ -449,7 +462,22 @@ fn main() {
                     bot.bwapi_dll.to_string_lossy().deref(),
                     bot.working_dir.to_string_lossy().deref(),
                 );
-                println!("Firing up {}", bot.name);
+                let old_connected_client_count =
+                    if matches!(bot.binary, Binary::Exe(_) | Binary::Dll(_)) {
+                        game_table_access
+                            .get_game_table()
+                            .map(|table| {
+                                table
+                                    .game_instances
+                                    .iter()
+                                    .filter(|it| it.is_connected)
+                                    .count()
+                            })
+                            .unwrap_or(0)
+                    } else {
+                        0
+                    };
+                println!("Firing up {} {}", bot.name, old_connected_client_count);
                 let bwheadless = cmd
                     .spawn()
                     .expect("Could not run bwheadless (maybe deleted/blocked by a Virus Scanner?)");
@@ -463,21 +491,53 @@ fn main() {
                         cmd.current_dir(Path::new(bot.working_dir.to_string_lossy().deref()));
                         cmd.arg("-jar").arg(jar);
 
-                        bot_process = Some(cmd.spawn().expect("Could not execute bot binary"));
+                        let child = cmd.spawn().expect("Could not execute bot binary");
 
-                        // Wait for a short moment to allow Server <-> Client connection - wait a bit longer than for exe bots
-                        // TODO : Connect to slots table instead!
-                        std::thread::sleep(Duration::from_millis(3000));
+                        // Wait up to 10 seconds before bailing
+                        retry(Fixed::from_millis(100).take(100), || {
+                            let found = game_table_access.get_game_table().map(|table| {
+                                table
+                                    .game_instances
+                                    .iter()
+                                    .filter(|game_instance| game_instance.is_connected)
+                                    .count()
+                                    > old_connected_client_count
+                            });
+                            match found {
+                                None => Err("Game table not found"),
+                                Some(true) => Ok(()),
+                                Some(false) => Err("Bot process not found in game table"),
+                            }
+                        })
+                        .expect("Bot failed to connect to BWAPI");
+                        bot_process = Some(child);
+
+                        // Give some time for
                     }
                     Binary::Exe(exe) => {
                         let mut cmd = Command::new(exe);
                         cmd.current_dir(Path::new(bot.working_dir.to_string_lossy().deref()));
 
-                        bot_process = Some(cmd.spawn().expect("Could not execute bot binary"));
+                        let child = cmd.spawn().expect("Could not execute bot binary");
 
-                        // Wait for a short moment to allow Server <-> Client connection - should be pretty fast for exe bots
-                        // TODO : Connect to slots table instead!
-                        std::thread::sleep(Duration::from_millis(1000));
+                        // Wait up to 10 seconds before bailing
+                        retry(Fixed::from_millis(100).take(100), || {
+                            let found = game_table_access.get_game_table().map(|table| {
+                                table
+                                    .game_instances
+                                    .iter()
+                                    .filter(|game_instance| game_instance.is_connected)
+                                    .count()
+                                    > old_connected_client_count
+                            });
+                            match found {
+                                None => Err("Game table not found"),
+                                Some(true) => Ok(()),
+                                Some(false) => Err("Bot process not found in game table"),
+                            }
+                        })
+                        .expect("Bot failed to connect to BWAPI");
+                        bot_process = Some(child);
                     }
                 }
                 // TODO: Redirect stderr to stdout - bwheadless is very silent for a typical command prompt
@@ -486,6 +546,7 @@ fn main() {
                     bot: bot_process,
                 });
             }
+
             // Clean up a bit, kill Client bots to prevent them from spamming the slot table
             // They will also print "Client And Server are not compatible" - if different versions of BWAPI are running with multiple clients
             while !instances.is_empty() {
