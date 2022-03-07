@@ -55,6 +55,8 @@ struct GameConfig {
     map: String,
     game_name: Option<String>,
     game_type: GameType,
+    #[serde(default)]
+    human_host: bool,
 }
 
 impl GameConfig {
@@ -67,8 +69,8 @@ impl GameConfig {
         )
         .map_err(|e| e.to_string())
         .expect("'game.toml' is invalid");
-        if result.map.is_empty() {
-            return Err("Missing map name".to_owned());
+        if result.map.is_empty() && !result.human_host {
+            return Err("Map must be set for non-human hosted games".to_owned());
         }
         let map_path_abs = Path::new(&result.map);
         let map_path_rel = config
@@ -434,7 +436,6 @@ fn main() {
                     (cfg, bot_folder, bot_definition)
                 })
                 .collect();
-            let mut host = false;
             let player_count = bots.len();
             let mut prepared_bots: Vec<_> = bots
                 .iter()
@@ -454,6 +455,8 @@ fn main() {
                 }
             }
             let mut instances = vec![];
+            // If a human is going to host, no need to fire up a host
+            let mut host = game_config.human_host;
             for bot in prepared_bots {
                 let mut cmd = if !host {
                     host = true;
