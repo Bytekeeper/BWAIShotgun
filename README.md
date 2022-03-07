@@ -1,3 +1,5 @@
+[![Build status](https://ci.appveyor.com/api/projects/status/3j406t3yd3oymiqy?svg=true)](https://ci.appveyor.com/project/Bytekeeper/bwaishotgun)
+
 # BWAIShotgun
 Utility to quickly setup Starcraft Broodwar matches between 2 *or more* bots
 
