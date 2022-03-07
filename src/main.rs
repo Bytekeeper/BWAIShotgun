@@ -1,6 +1,7 @@
 mod bwapi;
 
 use anyhow::bail;
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
 use std::fs::{create_dir_all, metadata, read, read_dir, File};
@@ -305,6 +306,7 @@ pub struct PreparedBot {
     name: String,
     bwapi_dll: PathBuf,
     working_dir: PathBuf,
+    log_dir: PathBuf,
 }
 
 impl PreparedBot {
@@ -316,9 +318,11 @@ impl PreparedBot {
         let ai_module_path = ai_module_path.as_path().join("AI");
         let read_path = bwapi_data_path.join("read");
         let write_path = bwapi_data_path.join("write");
+        let log_dir = path.join("logs");
         let bwapi_ini_path = bwapi_data_path.join("bwapi.ini");
         create_dir_all(read_path).expect("Could not create read folder");
         create_dir_all(write_path).expect("Could not create write folder");
+        create_dir_all(&log_dir).expect("Colud not create log folder");
         let mut bwapi_ini = File::create(bwapi_ini_path).expect("Could not create 'bwapi.ini'");
 
         let bot_binary = definition
@@ -348,6 +352,7 @@ impl PreparedBot {
                 .unwrap_or_else(|| config.name.clone()),
             bwapi_dll: bwapi_data_path.join("BWAPI.dll"),
             working_dir: path.to_path_buf(),
+            log_dir,
         }
     }
 }
@@ -420,7 +425,7 @@ fn main() {
                     .expect("Could not read 'bot.toml'");
                     if let Some(race) = &cfg.race {
                         if bot_definition.race != Race::Random && &bot_definition.race != race {
-                            eprintln!(
+                            println!(
                                 "Bot '{}' is configured to play as {}, but its default race is {}!",
                                 cfg.name, race, bot_definition.race
                             );
@@ -442,6 +447,12 @@ fn main() {
                     0
                 }
             });
+            let mut bot_names = HashSet::new();
+            for bot in prepared_bots.iter().map(|it| &it.name) {
+                if !bot_names.insert(bot) {
+                    println!("'{}' was added multiple times. All instances will use the same read/write/log folders and could fail to work properly.", bot);
+                }
+            }
             let mut instances = vec![];
             for bot in prepared_bots {
                 let mut cmd = if !host {
@@ -477,11 +488,23 @@ fn main() {
                     } else {
                         0
                     };
-                println!("Firing up {} {}", bot.name, old_connected_client_count);
+                cmd.stdout(
+                    File::create(bot.log_dir.join("game_out.log"))
+                        .expect("Could not create game output log"),
+                );
+                cmd.stderr(
+                    File::create(bot.log_dir.join("game_err.log"))
+                        .expect("Could not create game error log"),
+                );
+                println!("Firing up {}", bot.name);
                 let bwheadless = cmd
                     .spawn()
                     .expect("Could not run bwheadless (maybe deleted/blocked by a Virus Scanner?)");
 
+                let bot_out_log = File::create(bot.log_dir.join("bot_out.log"))
+                    .expect("Could not create bot output log");
+                let bot_err_log = File::create(bot.log_dir.join("bot_err.log"))
+                    .expect("Could not create bot error log");
                 let mut bot_process = None;
                 match bot.binary {
                     Binary::Dll(_) => (), // Loaded by BWAPI
@@ -490,6 +513,8 @@ fn main() {
                             Command::new(config.java_path.as_deref().unwrap_or("java.exe"));
                         cmd.current_dir(Path::new(bot.working_dir.to_string_lossy().deref()));
                         cmd.arg("-jar").arg(jar);
+                        cmd.stdout(bot_out_log);
+                        cmd.stderr(bot_err_log);
 
                         let child = cmd.spawn().expect("Could not execute bot binary");
 
@@ -517,6 +542,8 @@ fn main() {
                     Binary::Exe(exe) => {
                         let mut cmd = Command::new(exe);
                         cmd.current_dir(Path::new(bot.working_dir.to_string_lossy().deref()));
+                        cmd.stdout(bot_out_log);
+                        cmd.stderr(bot_err_log);
 
                         let child = cmd.spawn().expect("Could not execute bot binary");
 
