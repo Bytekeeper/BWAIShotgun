@@ -30,5 +30,7 @@ Finally, run `bwaishotgun.exe` - it should show some info output of bots being s
 There is currently no timeout mechanism. 
 If the game does not stop after a few minutes, kill it and check the `logs` folder inside each bot folder for errors.
 
+After the game ran, check the `replays` folder for each bot - they should contain the replay from that bots perspective.
+
 If a bot fails to work, feel free to open an issue - please include a zipped up version of that bots directory. 
 Bots older that BWAPI 4.2 might need some more setup, please make sure that it can run without `bwaishotgun`, before opening a ticket.
