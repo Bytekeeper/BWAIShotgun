@@ -1,6 +1,8 @@
 mod bwapi;
+mod cli;
 
 use anyhow::bail;
+use clap::Parser;
 use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
@@ -12,6 +14,7 @@ use std::process::{Child, Command};
 use std::time::Duration;
 
 use crate::bwapi::GameTableAccess;
+use crate::cli::Cli;
 use registry::{Hive, Security};
 use retry::delay::Fixed;
 use retry::retry;
@@ -39,28 +42,28 @@ impl ShotgunConfig {
 }
 
 #[derive(Deserialize, Debug)]
-struct BotConfig {
-    name: String,
-    player_name: Option<String>,
-    race: Option<Race>,
+pub struct BotConfig {
+    pub name: String,
+    pub player_name: Option<String>,
+    pub race: Option<Race>,
 }
 
 #[derive(Deserialize, Debug)]
-enum GameType {
+pub enum GameType {
     Melee(Vec<BotConfig>),
 }
 
 #[derive(Deserialize, Debug)]
-struct GameConfig {
-    map: String,
-    game_name: Option<String>,
-    game_type: GameType,
+pub struct GameConfig {
+    pub map: String,
+    pub game_name: Option<String>,
+    pub game_type: GameType,
     #[serde(default)]
-    human_host: bool,
+    pub human_host: bool,
 }
 
 impl GameConfig {
-    fn new(config: &ShotgunConfig) -> Result<Self, String> {
+    fn load(config: &ShotgunConfig) -> Result<Self, String> {
         let result: GameConfig = toml::from_slice(
             read(base_folder().join("game.toml"))
                 .map_err(|e| e.to_string())
@@ -91,7 +94,7 @@ struct BotDefinition {
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-enum Race {
+pub enum Race {
     Protoss,
     Terran,
     Zerg,
@@ -371,10 +374,17 @@ fn main() {
             ShotgunConfig::default()
         });
 
-    let game_config = GameConfig::new(&config).expect("Could not load 'game.toml'");
+    let cli = Cli::parse();
 
-    // let config: BotDefinition = toml::from_slice(read("bots/template/bot.toml")?.as_slice())?;
-    // println!("{config:?}");
+    let game_config: Result<GameConfig, cli::Error> = cli.try_into();
+    let game_config = match game_config {
+        Ok(game_config) => game_config,
+        Err(cli::Error::NoArguments) => {
+            GameConfig::load(&config).expect("Could not load 'game.toml'")
+        }
+        Err(cli::Error::ClapError(err)) => err.exit(),
+    };
+
     let starcraft_path = config
         .get_starcraft_path()
         .expect("Could not find StarCraft installation");
