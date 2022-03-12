@@ -22,6 +22,8 @@ pub struct Cli {
     map: Option<String>,
     #[clap(subcommand)]
     game_type: Option<GameType>,
+    #[clap(short, long)]
+    human_speed: bool,
 }
 
 pub enum Error {
@@ -48,6 +50,7 @@ impl TryFrom<Cli> for GameConfig {
                             name: name.to_string(),
                             player_name: None,
                             race: None,
+                            headful: false,
                         })
                         .collect(),
                 ),
@@ -57,6 +60,7 @@ impl TryFrom<Cli> for GameConfig {
                 game_name: None,
                 game_type,
                 human_host: matches!(cli.game_type.unwrap(), GameType::Human { .. }),
+                human_speed: cli.human_speed,
             })
         }
     }

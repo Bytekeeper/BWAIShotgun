@@ -1,23 +1,27 @@
+mod botsetup;
 mod bwapi;
+mod bwheadless;
 mod cli;
+mod injectory;
 
-use anyhow::bail;
+use anyhow::{anyhow, bail};
 use clap::Parser;
 use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
-use std::fs::{create_dir_all, metadata, read, read_dir, File};
-use std::io::Write;
-use std::ops::Deref;
+use std::fs::{create_dir_all, metadata, read, File};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::Duration;
 
-use crate::bwapi::GameTableAccess;
+use crate::botsetup::{Binary, LaunchBuilder};
+use crate::bwapi::{AutoMenu, BwapiConnectMode, BwapiIni, GameTableAccess};
+use crate::bwheadless::{BwHeadless, BwHeadlessConnectMode};
 use crate::cli::Cli;
+use crate::injectory::{Injectory, InjectoryConnectMode};
 use registry::{Hive, Security};
 use retry::delay::Fixed;
-use retry::retry;
+use retry::{retry, OperationResult};
 use serde::de::Unexpected;
 use serde::{Deserialize, Deserializer};
 
@@ -46,6 +50,8 @@ pub struct BotConfig {
     pub name: String,
     pub player_name: Option<String>,
     pub race: Option<Race>,
+    #[serde(default)]
+    pub headful: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -60,20 +66,18 @@ pub struct GameConfig {
     pub game_type: GameType,
     #[serde(default)]
     pub human_host: bool,
+    #[serde(default)]
+    pub human_speed: bool,
 }
 
 impl GameConfig {
-    fn load(config: &ShotgunConfig) -> Result<Self, String> {
-        let result: GameConfig = toml::from_slice(
-            read(base_folder().join("game.toml"))
+    fn load(config: &ShotgunConfig) -> anyhow::Result<GameConfig> {
+        let result: GameConfig =
+            toml::from_slice(read(base_folder().join("game.toml"))?.as_slice())
                 .map_err(|e| e.to_string())
-                .expect("'game.toml' not found")
-                .as_slice(),
-        )
-        .map_err(|e| e.to_string())
-        .expect("'game.toml' is invalid");
+                .expect("'game.toml' is invalid");
         if result.map.is_empty() && !result.human_host {
-            return Err("Map must be set for non-human hosted games".to_owned());
+            bail!("Map must be set for non-human hosted games");
         }
         let map_path_abs = Path::new(&result.map);
         let map_path_rel = config
@@ -81,7 +85,7 @@ impl GameConfig {
             .expect("Could not find StarCraft installation")
             .join(&result.map);
         if map_path_abs.is_absolute() && !map_path_abs.exists() | !map_path_rel.exists() {
-            return Err(format!("Could not find map '{}'", result.map));
+            bail!("Could not find map '{}'", result.map);
         }
         Ok(result)
     }
@@ -134,25 +138,8 @@ impl Display for Race {
     }
 }
 
-struct BwapiIni {
-    ai: String,
-}
-
-impl BwapiIni {
-    fn write(&self, out: &mut impl Write) -> std::io::Result<()> {
-        writeln!(out, "[ai]")?;
-        writeln!(out, "ai = {}", self.ai)?;
-        writeln!(out, "[auto_menu]")?;
-        writeln!(
-            out,
-            "save_replay = replays/$Y $b $d/%MAP%_%BOTRACE%%ALLYRACES%vs%ENEMYRACES%_$H$M$S.rep"
-        )?;
-        writeln!(out, "[starcraft]")?;
-        writeln!(out, "speed_override = 0")
-    }
-}
 #[derive(Debug)]
-enum SGError {
+pub enum SGError {
     MissingStarCraftExe(PathBuf),
     MultipleExecutables(PathBuf),
     ExecutableNotFound(PathBuf),
@@ -184,67 +171,8 @@ impl Display for SGError {
     }
 }
 
-struct BwHeadless {
-    starcraft_exe: PathBuf,
-}
-
-impl BwHeadless {
-    fn new(starcraft_exe: &Path) -> Result<Self, SGError> {
-        if !&starcraft_exe.exists() {
-            return Err(SGError::MissingStarCraftExe(starcraft_exe.to_path_buf()));
-        }
-        Ok(Self {
-            starcraft_exe: starcraft_exe.to_path_buf(),
-        })
-    }
-
-    fn host_command(
-        &self,
-        map: &str,
-        player_count: usize,
-        game_name: &str,
-    ) -> std::io::Result<Command> {
-        let mut cmd = self.bwheadless_command()?;
-        cmd.arg("-m").arg(map);
-        cmd.arg("-h").arg(player_count.to_string());
-        cmd.arg("-g").arg(game_name);
-        Ok(cmd)
-    }
-
-    fn join_command(&self) -> std::io::Result<Command> {
-        self.bwheadless_command()
-    }
-
-    fn bwheadless_command(&self) -> std::io::Result<Command> {
-        let mut bwheadless = base_folder();
-        bwheadless.push("bwheadless.exe");
-        let mut cmd = Command::new(bwheadless);
-        cmd.arg("-e").arg(&self.starcraft_exe);
-        Ok(cmd)
-    }
-
-    fn add_bot_args(
-        cmd: &mut Command,
-        race: Race,
-        bot_name: &str,
-        bwapi_dll_path: &str,
-        bot_bwapi_path: &str,
-    ) {
-        cmd.arg("-r").arg(race.to_string());
-        cmd.arg("-l").arg(bwapi_dll_path);
-        cmd.arg("--installpath").arg(&bot_bwapi_path);
-        cmd.arg("-n").arg(bot_name);
-        // Newer versions of BWAPI no longer use the registry key (aka installpath) - but allow overriding the bwapi_ini location
-        let ini_path = PathBuf::from(bot_bwapi_path).join("bwapi-data/bwapi.ini");
-        cmd.env(
-            "BWAPI_CONFIG_INI",
-            ini_path.to_str().expect("Could not find bwapi.ini"),
-        );
-        cmd.current_dir(bot_bwapi_path);
-    }
-}
-
-fn base_folder() -> PathBuf {
+/// bwaishotgun base folder
+pub fn base_folder() -> PathBuf {
     std::env::current_exe()
         .expect("Could not find executable")
         .parent()
@@ -252,51 +180,9 @@ fn base_folder() -> PathBuf {
         .to_owned()
 }
 
-#[derive(Debug)]
-enum Binary {
-    Dll(PathBuf),
-    Jar(PathBuf),
-    Exe(PathBuf),
-}
-
-impl Binary {
-    fn from_path(path: &Path) -> Option<Self> {
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .and_then(|ext| {
-                let mut ext = ext.to_string();
-                ext.make_ascii_lowercase();
-                let result = match ext.as_str() {
-                    "dll" => Binary::Dll(path.to_path_buf()),
-                    "jar" => Binary::Jar(path.to_path_buf()),
-                    "exe" => Binary::Exe(path.to_path_buf()),
-                    _ => return None,
-                };
-                Some(result)
-            })
-    }
-
-    fn search(search_path: &Path) -> anyhow::Result<Self> {
-        let mut executable = None;
-        for file in read_dir(search_path)?.flatten() {
-            let path = file.path();
-            if let Some(detected_binary) = Binary::from_path(&path) {
-                executable = Some(match (executable, detected_binary) {
-                    (None, dll @ Binary::Dll(_)) | (Some(dll @ Binary::Dll(_)), Binary::Jar(_)) => {
-                        dll
-                    }
-                    (None, jar @ Binary::Jar(_)) => jar,
-                    (None, exe @ Binary::Exe(_))
-                    | (Some(Binary::Dll(_) | Binary::Jar(_)), exe @ Binary::Exe(_)) => exe,
-                    _ => bail!(SGError::MultipleExecutables(search_path.to_path_buf())),
-                })
-            }
-        }
-        match executable {
-            None => bail!(SGError::ExecutableNotFound(search_path.to_path_buf())),
-            Some(x) => Ok(x),
-        }
-    }
+/// tools folder
+pub fn tools_folder() -> PathBuf {
+    base_folder().join("tools")
 }
 
 pub struct BotProcess {
@@ -309,9 +195,9 @@ pub struct PreparedBot {
     binary: Binary,
     race: Race,
     name: String,
-    bwapi_dll: PathBuf,
     working_dir: PathBuf,
     log_dir: PathBuf,
+    headful: bool,
 }
 
 impl PreparedBot {
@@ -324,11 +210,9 @@ impl PreparedBot {
         let read_path = bwapi_data_path.join("read");
         let write_path = bwapi_data_path.join("write");
         let log_dir = path.join("logs");
-        let bwapi_ini_path = bwapi_data_path.join("bwapi.ini");
         create_dir_all(read_path).expect("Could not create read folder");
         create_dir_all(write_path).expect("Could not create write folder");
         create_dir_all(&log_dir).expect("Colud not create log folder");
-        let mut bwapi_ini = File::create(bwapi_ini_path).expect("Could not create 'bwapi.ini'");
 
         let bot_binary = definition
             .executable
@@ -338,31 +222,23 @@ impl PreparedBot {
                 Binary::search(ai_module_path.as_path())
                     .expect("Could not find bot binary in 'bwapi-data/AI'")
             });
-        BwapiIni {
-            ai: match &bot_binary {
-                Binary::Dll(x) => x.to_string_lossy().to_string(),
-                Binary::Exe(_) | Binary::Jar(_) => "".to_string(),
-            },
-        }
-        .write(&mut bwapi_ini)
-        .expect("Could not write 'bwapi.ini'");
-        drop(bwapi_ini);
+        let race = config.race.unwrap_or(definition.race);
 
         Self {
             binary: bot_binary,
-            race: config.race.unwrap_or(definition.race),
+            race,
             name: config
                 .player_name
                 .clone()
                 .unwrap_or_else(|| config.name.clone()),
-            bwapi_dll: bwapi_data_path.join("BWAPI.dll"),
             working_dir: path.to_path_buf(),
             log_dir,
+            headful: config.headful,
         }
     }
 }
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     let config: ShotgunConfig = read(base_folder().join("shotgun.toml"))
         .map(|cfg| {
             toml::from_slice(cfg.as_slice())
@@ -389,9 +265,6 @@ fn main() {
         .get_starcraft_path()
         .expect("Could not find StarCraft installation");
     let starcraft_exe = starcraft_path.join("StarCraft.exe");
-    let bwheadless = BwHeadless::new(&starcraft_exe)
-        .map_err(|e| e.to_string())
-        .expect("StarCraft.exe could not be found");
     if let Ok(metadata) = metadata(starcraft_path.join("SNP_DirectIP.snp")) {
         if metadata.len() != 46100 {
             eprintln!("The 'SNP_DirectIP.snp' in your StarCraft installation might not support more than ~6 bots per game. Overwrite with the included 'SNP_DirectIP.snp' file to support more.");
@@ -405,6 +278,7 @@ fn main() {
         .get_game_table()
         .iter()
         .flat_map(|table| table.game_instances.iter())
+        .filter(|it| it.is_connected && it.server_process_id != 0)
         .map(|it| it.server_process_id)
     {
         eprintln!(
@@ -458,59 +332,79 @@ fn main() {
                     0
                 }
             });
+
             let mut bot_names = HashSet::new();
             for bot in prepared_bots.iter().map(|it| &it.name) {
                 if !bot_names.insert(bot) {
-                    println!("'{}' was added multiple times. All instances will use the same read/write/log folders and could fail to work properly.", bot);
+                    println!("'{}' was added multiple times. All instances will use the same read/write/log folders and could fail to work properly. Also headful mode will not work as expected.", bot);
                 }
             }
             let mut instances = vec![];
             // If a human is going to host, no need to fire up a host
-            let mut host = game_config.human_host;
+            let mut host = !game_config.human_host;
+            // Game name is mutable, BWAPI can't create games with names differing from the player name in LAN
+            let mut game_name = game_config
+                .game_name
+                .as_deref()
+                .unwrap_or("shotgun")
+                .to_string();
             for bot in prepared_bots {
-                let mut cmd = if !host {
-                    host = true;
-                    bwheadless.host_command(
-                        &game_config.map,
-                        player_count,
-                        game_config.game_name.as_deref().unwrap_or("shotgun"),
-                    )
+                let bwapi_launcher: Box<dyn LaunchBuilder> = if bot.headful {
+                    if host {
+                        // Headful + Host => All other bots need to join the game with this bots player name
+                        game_name = bot.name.clone();
+                    }
+                    Box::new(Injectory {
+                        starcraft_exe: starcraft_exe.clone(),
+                        bot_base_path: bot.working_dir.clone(),
+                        player_name: bot.name.clone(),
+                        game_name: game_name.clone(),
+                        race: bot.race,
+                        connect_mode: if host {
+                            InjectoryConnectMode::Host {
+                                map: game_config.map.clone(),
+                                player_count,
+                            }
+                        } else {
+                            InjectoryConnectMode::Join
+                        },
+                        wmode: true,
+                        game_speed: if game_config.human_speed { -1 } else { 0 },
+                    })
                 } else {
-                    bwheadless.join_command()
+                    Box::new(BwHeadless {
+                        starcraft_exe: starcraft_exe.clone(),
+                        bot_base_path: bot.working_dir.clone(),
+                        bot_name: bot.name.clone(),
+                        race: bot.race,
+                        game_name: game_name.clone(),
+                        connect_mode: if host {
+                            BwHeadlessConnectMode::Host {
+                                map: game_config.map.clone(),
+                                player_count,
+                            }
+                        } else {
+                            BwHeadlessConnectMode::Join
+                        },
+                    })
+                };
+                if host {
+                    println!("Hosting game with '{}'", bot.name);
+                } else {
+                    println!("Joining game with '{}'", bot.name);
                 }
-                .expect("Could not execute bwheadless");
-                BwHeadless::add_bot_args(
-                    &mut cmd,
-                    bot.race,
-                    &bot.name,
-                    bot.bwapi_dll.to_string_lossy().deref(),
-                    bot.working_dir.to_string_lossy().deref(),
-                );
+                host = false;
+
                 let old_connected_client_count =
                     if matches!(bot.binary, Binary::Exe(_) | Binary::Dll(_)) {
-                        game_table_access
-                            .get_game_table()
-                            .map(|table| {
-                                table
-                                    .game_instances
-                                    .iter()
-                                    .filter(|it| it.is_connected)
-                                    .count()
-                            })
-                            .unwrap_or(0)
+                        game_table_access.get_connected_client_count()
                     } else {
                         0
                     };
-                cmd.stdout(
-                    File::create(bot.log_dir.join("game_out.log"))
-                        .expect("Could not create game output log"),
-                );
-                cmd.stderr(
-                    File::create(bot.log_dir.join("game_err.log"))
-                        .expect("Could not create game error log"),
-                );
-                println!("Firing up {}", bot.name);
-                let bwheadless = cmd
+                let mut cmd = bwapi_launcher.build_command(&bot.binary)?;
+                cmd.stdout(File::create(bot.log_dir.join("game_out.log"))?)
+                    .stderr(File::create(bot.log_dir.join("game_err.log"))?);
+                let mut bwapi_child = cmd
                     .spawn()
                     .expect("Could not run bwheadless (maybe deleted/blocked by a Virus Scanner?)");
 
@@ -524,65 +418,64 @@ fn main() {
                     Binary::Jar(jar) => {
                         let mut cmd =
                             Command::new(config.java_path.as_deref().unwrap_or("java.exe"));
-                        cmd.current_dir(Path::new(bot.working_dir.to_string_lossy().deref()));
+                        cmd.current_dir(bot.working_dir);
                         cmd.arg("-jar").arg(jar);
                         cmd.stdout(bot_out_log);
                         cmd.stderr(bot_err_log);
 
-                        let child = cmd.spawn().expect("Could not execute bot binary");
+                        let mut child = cmd.spawn()?;
 
                         // Wait up to 10 seconds before bailing
                         retry(Fixed::from_millis(100).take(100), || {
-                            let found = game_table_access.get_game_table().map(|table| {
-                                table
-                                    .game_instances
-                                    .iter()
-                                    .filter(|game_instance| game_instance.is_connected)
-                                    .count()
-                                    > old_connected_client_count
-                            });
-                            match found {
-                                None => Err("Game table not found"),
-                                Some(true) => Ok(()),
-                                Some(false) => Err("Bot process not found in game table"),
+                            let found = game_table_access.get_connected_client_count()
+                                > old_connected_client_count;
+                            if !matches!(bwapi_child.try_wait(), Ok(None)) {
+                                OperationResult::Err("BWAPI process died")
+                            } else if !matches!(child.try_wait(), Ok(None)) {
+                                OperationResult::Err("Bot process died")
+                            } else if found {
+                                OperationResult::Ok(())
+                            } else {
+                                OperationResult::Retry(
+                                    "Bot client executable did not connect to BWAPI server",
+                                )
                             }
                         })
-                        .expect("Bot failed to connect to BWAPI");
+                        .map_err(|e| anyhow!(e))?;
                         bot_process = Some(child);
 
                         // Give some time for
                     }
                     Binary::Exe(exe) => {
                         let mut cmd = Command::new(exe);
-                        cmd.current_dir(Path::new(bot.working_dir.to_string_lossy().deref()));
+                        cmd.current_dir(bot.working_dir);
                         cmd.stdout(bot_out_log);
                         cmd.stderr(bot_err_log);
 
-                        let child = cmd.spawn().expect("Could not execute bot binary");
+                        let mut child = cmd.spawn()?;
 
                         // Wait up to 10 seconds before bailing
                         retry(Fixed::from_millis(100).take(100), || {
-                            let found = game_table_access.get_game_table().map(|table| {
-                                table
-                                    .game_instances
-                                    .iter()
-                                    .filter(|game_instance| game_instance.is_connected)
-                                    .count()
-                                    > old_connected_client_count
-                            });
-                            match found {
-                                None => Err("Game table not found"),
-                                Some(true) => Ok(()),
-                                Some(false) => Err("Bot process not found in game table"),
+                            let found = game_table_access.get_connected_client_count()
+                                > old_connected_client_count;
+                            if !matches!(bwapi_child.try_wait(), Ok(None)) {
+                                OperationResult::Err("BWAPI process died")
+                            } else if !matches!(child.try_wait(), Ok(None)) {
+                                OperationResult::Err("Bot process died")
+                            } else if found {
+                                OperationResult::Ok(())
+                            } else {
+                                OperationResult::Retry(
+                                    "Bot client executable did not connect to BWAPI server",
+                                )
                             }
                         })
-                        .expect("Bot failed to connect to BWAPI");
+                        .map_err(|e| anyhow!(e))?;
                         bot_process = Some(child);
                     }
                 }
-                // TODO: Redirect stderr to stdout - bwheadless is very silent for a typical command prompt
                 instances.push(BotProcess {
-                    bwheadless,
+                    bwheadless: bwapi_child,
                     bot: bot_process,
                 });
             }
@@ -601,10 +494,13 @@ fn main() {
                             bot.kill().ok();
                         }
                         instances.swap_remove(i);
+                        println!("{} bots remaining", instances.len());
                     }
                 }
                 std::thread::sleep(Duration::from_secs(1));
             }
+            println!("Done");
+            Ok(())
         }
     }
 }
