@@ -16,7 +16,7 @@ pub struct BwHeadless {
     pub bot_base_path: PathBuf,
     pub bot_name: String,
     pub race: Race,
-    pub game_name: String,
+    pub game_name: Option<String>,
     pub connect_mode: BwHeadlessConnectMode,
 }
 
@@ -58,7 +58,9 @@ impl LaunchBuilder for BwHeadless {
 
         let mut cmd = Command::new(bwheadless);
         cmd.arg("-e").arg(&self.starcraft_exe);
-        cmd.arg("-g").arg(&self.game_name);
+        if let Some(game_name) = &self.game_name {
+            cmd.arg("-g").arg(game_name);
+        }
         cmd.arg("-r").arg(&self.race.to_string());
         cmd.arg("-l").arg(bwapi_dll);
         cmd.arg("--installpath").arg(&self.bot_base_path);

@@ -358,7 +358,11 @@ fn main() -> anyhow::Result<()> {
                         starcraft_exe: starcraft_exe.clone(),
                         bot_base_path: bot.working_dir.clone(),
                         player_name: bot.name.clone(),
-                        game_name: game_name.clone(),
+                        game_name: if game_config.human_host {
+                            "JOIN_FIRST".to_string()
+                        } else {
+                            game_name.clone()
+                        },
                         race: bot.race,
                         connect_mode: if host {
                             InjectoryConnectMode::Host {
@@ -377,7 +381,11 @@ fn main() -> anyhow::Result<()> {
                         bot_base_path: bot.working_dir.clone(),
                         bot_name: bot.name.clone(),
                         race: bot.race,
-                        game_name: game_name.clone(),
+                        game_name: if game_config.human_host {
+                            None
+                        } else {
+                            Some(game_name.clone())
+                        },
                         connect_mode: if host {
                             BwHeadlessConnectMode::Host {
                                 map: game_config.map.clone(),
@@ -412,68 +420,43 @@ fn main() -> anyhow::Result<()> {
                     .expect("Could not create bot output log");
                 let bot_err_log = File::create(bot.log_dir.join("bot_err.log"))
                     .expect("Could not create bot error log");
-                let mut bot_process = None;
-                match bot.binary {
-                    Binary::Dll(_) => (), // Loaded by BWAPI
+                let bot_process = match bot.binary {
+                    Binary::Dll(_) => None,
                     Binary::Jar(jar) => {
                         let mut cmd =
                             Command::new(config.java_path.as_deref().unwrap_or("java.exe"));
-                        cmd.current_dir(bot.working_dir);
                         cmd.arg("-jar").arg(jar);
-                        cmd.stdout(bot_out_log);
-                        cmd.stderr(bot_err_log);
-
-                        let mut child = cmd.spawn()?;
-
-                        // Wait up to 10 seconds before bailing
-                        retry(Fixed::from_millis(100).take(100), || {
-                            let found = game_table_access.get_connected_client_count()
-                                > old_connected_client_count;
-                            if !matches!(bwapi_child.try_wait(), Ok(None)) {
-                                OperationResult::Err("BWAPI process died")
-                            } else if !matches!(child.try_wait(), Ok(None)) {
-                                OperationResult::Err("Bot process died")
-                            } else if found {
-                                OperationResult::Ok(())
-                            } else {
-                                OperationResult::Retry(
-                                    "Bot client executable did not connect to BWAPI server",
-                                )
-                            }
-                        })
-                        .map_err(|e| anyhow!(e))?;
-                        bot_process = Some(child);
-
-                        // Give some time for
+                        Some(cmd)
                     }
-                    Binary::Exe(exe) => {
-                        let mut cmd = Command::new(exe);
-                        cmd.current_dir(bot.working_dir);
-                        cmd.stdout(bot_out_log);
-                        cmd.stderr(bot_err_log);
-
-                        let mut child = cmd.spawn()?;
-
-                        // Wait up to 10 seconds before bailing
-                        retry(Fixed::from_millis(100).take(100), || {
-                            let found = game_table_access.get_connected_client_count()
-                                > old_connected_client_count;
-                            if !matches!(bwapi_child.try_wait(), Ok(None)) {
-                                OperationResult::Err("BWAPI process died")
-                            } else if !matches!(child.try_wait(), Ok(None)) {
-                                OperationResult::Err("Bot process died")
-                            } else if found {
-                                OperationResult::Ok(())
-                            } else {
-                                OperationResult::Retry(
-                                    "Bot client executable did not connect to BWAPI server",
-                                )
-                            }
-                        })
-                        .map_err(|e| anyhow!(e))?;
-                        bot_process = Some(child);
-                    }
+                    Binary::Exe(exe) => Some(Command::new(exe)),
                 }
+                .map(|ref mut cmd| -> anyhow::Result<Child> {
+                    cmd.current_dir(bot.working_dir);
+                    cmd.stdout(bot_out_log);
+                    cmd.stderr(bot_err_log);
+
+                    let mut child = cmd.spawn()?;
+
+                    // Wait up to 10 seconds before bailing
+                    retry(Fixed::from_millis(100).take(100), || {
+                        let found = game_table_access.get_connected_client_count()
+                            > old_connected_client_count;
+                        if !matches!(bwapi_child.try_wait(), Ok(None)) {
+                            OperationResult::Err("BWAPI process died")
+                        } else if !matches!(child.try_wait(), Ok(None)) {
+                            OperationResult::Err("Bot process died")
+                        } else if found {
+                            OperationResult::Ok(())
+                        } else {
+                            OperationResult::Retry(
+                                "Bot client executable did not connect to BWAPI server",
+                            )
+                        }
+                    })
+                    .map_err(|e| anyhow!(e))?;
+                    Ok(child)
+                })
+                .transpose()?;
                 instances.push(BotProcess {
                     bwheadless: bwapi_child,
                     bot: bot_process,
