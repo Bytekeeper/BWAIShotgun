@@ -1,9 +1,11 @@
-use crate::botsetup::{Binary, LaunchBuilder};
-use crate::{tools_folder, AutoMenu, BwapiConnectMode, BwapiIni, Race};
-use anyhow::ensure;
 use std::fs::File;
 use std::path::PathBuf;
 use std::process::Command;
+
+use anyhow::ensure;
+
+use crate::botsetup::{Binary, LaunchBuilder};
+use crate::{tools_folder, AutoMenu, BwapiConnectMode, BwapiIni, Race};
 
 pub enum InjectoryConnectMode {
     Host { map: String, player_count: usize },
@@ -11,6 +13,7 @@ pub enum InjectoryConnectMode {
 }
 
 pub struct Injectory {
+    pub starcraft_path: PathBuf,
     pub starcraft_exe: PathBuf,
     /// Folder containing bwapi-data/AI
     pub bot_base_path: PathBuf,
@@ -73,6 +76,23 @@ impl LaunchBuilder for Injectory {
             game_speed: self.game_speed,
         }
         .write(&mut bwapi_ini_file)?;
+
+        // BWAPI will look for the map in the "bot" folder, not in the starcraft path, so we'll copy the map over.
+        /* TODO: This is all for naught, BWAPI does not allow game speed selection - a TM "hack" is required first here
+        // We really need to copy, because it will open the map to check for settings.
+        if let InjectoryConnectMode::Host { map, .. } = &self.connect_mode {
+            let original_map = self.starcraft_path.join(map);
+            ensure!(
+                original_map.exists(),
+                "Map '{}' does not exist",
+                original_map.to_string_lossy()
+            );
+            let tmp_map = self.bot_base_path.join(map);
+            create_dir_all(tmp_map.parent().expect("Map file has no parent directory"))?;
+            copy(original_map, tmp_map)?;
+        }
+        */
+
         let mut cmd = Command::new(injectory);
         cmd.arg("-l").arg(&self.starcraft_exe);
         cmd.arg("-i").arg(bwapi_dll);

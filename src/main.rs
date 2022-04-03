@@ -212,12 +212,12 @@ impl PreparedBot {
         let log_dir = path.join("logs");
         create_dir_all(read_path).expect("Could not create read folder");
         create_dir_all(write_path).expect("Could not create write folder");
-        create_dir_all(&log_dir).expect("Colud not create log folder");
+        create_dir_all(&log_dir).expect("Could not create log folder");
 
         let bot_binary = definition
             .executable
             .as_deref()
-            .and_then(|s| Binary::from_path(Path::new(s)))
+            .and_then(|s| Binary::from_path(path.join(s).as_path()))
             .unwrap_or_else(|| {
                 Binary::search(ai_module_path.as_path())
                     .expect("Could not find bot binary in 'bwapi-data/AI'")
@@ -355,6 +355,7 @@ fn main() -> anyhow::Result<()> {
                         game_name = bot.name.clone();
                     }
                     Box::new(Injectory {
+                        starcraft_path: starcraft_path.clone(),
                         starcraft_exe: starcraft_exe.clone(),
                         bot_base_path: bot.working_dir.clone(),
                         player_name: bot.name.clone(),
