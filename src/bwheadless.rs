@@ -1,5 +1,5 @@
 use crate::botsetup::LaunchBuilder;
-use crate::{tools_folder, Binary, BwapiIni, Race};
+use crate::{tools_folder, Binary, BwapiIni, GameConfig, Race, SandboxMode};
 use anyhow::{anyhow, ensure};
 use std::fs::File;
 use std::path::PathBuf;
@@ -18,10 +18,15 @@ pub struct BwHeadless {
     pub race: Race,
     pub game_name: Option<String>,
     pub connect_mode: BwHeadlessConnectMode,
+    pub sandbox: SandboxMode,
 }
 
 impl LaunchBuilder for BwHeadless {
-    fn build_command(&self, bot_binary: &Binary) -> anyhow::Result<Command> {
+    fn build_command(
+        &self,
+        bot_binary: &Binary,
+        game_config: &GameConfig,
+    ) -> anyhow::Result<Command> {
         ensure!(
             self.starcraft_exe.exists(),
             "Could not find 'StarCraft.exe'"
@@ -56,7 +61,7 @@ impl LaunchBuilder for BwHeadless {
         }
         .write(&mut bwapi_ini_file)?;
 
-        let mut cmd = Command::new(bwheadless);
+        let mut cmd = self.sandbox.wrap_executable(bwheadless);
         cmd.arg("-e").arg(&self.starcraft_exe);
         if let Some(game_name) = &self.game_name {
             cmd.arg("-g").arg(game_name);
@@ -65,6 +70,7 @@ impl LaunchBuilder for BwHeadless {
         cmd.arg("-l").arg(bwapi_dll);
         cmd.arg("--installpath").arg(&self.bot_base_path);
         cmd.arg("-n").arg(&self.bot_name);
+        cmd.arg("-gs").arg(game_config.latency_frames.to_string());
         // Newer versions of BWAPI no longer use the registry key (aka installpath) - but allow overriding the bwapi_ini location.
         cmd.env("BWAPI_CONFIG_INI", &*bwapi_ini.to_string_lossy());
         cmd.current_dir(&self.bot_base_path);

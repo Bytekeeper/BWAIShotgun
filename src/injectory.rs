@@ -5,7 +5,7 @@ use std::process::Command;
 use anyhow::ensure;
 
 use crate::botsetup::{Binary, LaunchBuilder};
-use crate::{tools_folder, AutoMenu, BwapiConnectMode, BwapiIni, Race};
+use crate::{tools_folder, AutoMenu, BwapiConnectMode, BwapiIni, GameConfig, Race, SandboxMode};
 
 pub enum InjectoryConnectMode {
     Host { map: String, player_count: usize },
@@ -23,10 +23,15 @@ pub struct Injectory {
     pub connect_mode: InjectoryConnectMode,
     pub wmode: bool,
     pub game_speed: i32,
+    pub sandbox: SandboxMode,
 }
 
 impl LaunchBuilder for Injectory {
-    fn build_command(&self, bot_binary: &Binary) -> anyhow::Result<Command> {
+    fn build_command(
+        &self,
+        bot_binary: &Binary,
+        _game_config: &GameConfig,
+    ) -> anyhow::Result<Command> {
         ensure!(
             self.starcraft_exe.exists(),
             "Could not find 'StarCraft.exe'"
@@ -74,6 +79,7 @@ impl LaunchBuilder for Injectory {
                 },
             },
             game_speed: self.game_speed,
+            tm_module: None,
         }
         .write(&mut bwapi_ini_file)?;
 
@@ -93,7 +99,7 @@ impl LaunchBuilder for Injectory {
         }
         */
 
-        let mut cmd = Command::new(injectory);
+        let mut cmd = self.sandbox.wrap_executable(injectory);
         cmd.arg("-l").arg(&self.starcraft_exe);
         cmd.arg("-i").arg(bwapi_dll);
         if self.wmode {

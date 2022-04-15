@@ -80,6 +80,7 @@ impl Default for AutoMenu {
 #[derive(Default)]
 pub struct BwapiIni {
     pub ai_module: Option<String>,
+    pub tm_module: Option<String>,
     // default: 0 - full throttle
     pub game_speed: i32,
     pub auto_menu: AutoMenu,
@@ -89,6 +90,9 @@ impl BwapiIni {
     pub fn write(&self, out: &mut impl Write) -> std::io::Result<()> {
         writeln!(out, "[ai]")?;
         writeln!(out, "ai = {}", self.ai_module.as_deref().unwrap_or(""))?;
+        if let Some(tm) = &self.tm_module {
+            writeln!(out, "tournament = {}", tm)?;
+        }
         writeln!(out, "[auto_menu]")?;
         match &self.auto_menu {
             AutoMenu::Unused => (),

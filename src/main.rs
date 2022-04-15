@@ -3,6 +3,7 @@ mod bwapi;
 mod bwheadless;
 mod cli;
 mod injectory;
+mod sandbox;
 
 use anyhow::{anyhow, bail};
 use clap::Parser;
@@ -11,7 +12,7 @@ use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
 use std::fs::{create_dir_all, metadata, read, File};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::Child;
 use std::time::Duration;
 
 use crate::botsetup::{Binary, LaunchBuilder};
@@ -25,10 +26,29 @@ use retry::{retry, OperationResult};
 use serde::de::Unexpected;
 use serde::{Deserialize, Deserializer};
 
+#[derive(Deserialize, Clone, Debug)]
+pub enum SandboxMode {
+    Unconfigured,
+    NoSandbox,
+    Sandboxie {
+        executable: PathBuf,
+        box_name: String,
+    },
+}
+
+impl Default for SandboxMode {
+    fn default() -> Self {
+        // Should be Unconfigured if we ever support bot sandboxing
+        SandboxMode::NoSandbox
+    }
+}
+
 #[derive(Deserialize, Debug, Default)]
 struct ShotgunConfig {
     starcraft_path: Option<String>,
     java_path: Option<String>,
+    #[serde(default)]
+    sandbox: SandboxMode,
 }
 
 impl ShotgunConfig {
@@ -68,6 +88,12 @@ pub struct GameConfig {
     pub human_host: bool,
     #[serde(default)]
     pub human_speed: bool,
+    #[serde(default = "default_latency")]
+    pub latency_frames: u32,
+}
+
+fn default_latency() -> u32 {
+    3
 }
 
 impl GameConfig {
@@ -217,7 +243,13 @@ impl PreparedBot {
         let bot_binary = definition
             .executable
             .as_deref()
-            .and_then(|s| Binary::from_path(path.join(s).as_path()))
+            .and_then(|s| {
+                // First try from bot path
+                Binary::from_path(path.join(s).as_path())
+                    // Then from base path
+                    .or_else(|| Binary::from_path(base_folder().join(s).as_path()))
+            })
+            // Lastly search
             .unwrap_or_else(|| {
                 Binary::search(ai_module_path.as_path())
                     .expect("Could not find bot binary in 'bwapi-data/AI'")
@@ -249,6 +281,19 @@ fn main() -> anyhow::Result<()> {
             eprintln!("shotgun.toml not found, using defaults");
             ShotgunConfig::default()
         });
+
+    if matches!(
+        config.sandbox,
+        SandboxMode::Unconfigured | SandboxMode::NoSandbox
+    ) {
+        // Currently, we don't support bot sandboxing
+        // println!("You're running bots without a sandbox.");
+        if let SandboxMode::Unconfigured = config.sandbox {
+            eprintln!("If you are sure you don't want use a sandbox, please edit 'shotgun.toml' and set the sandbox to 'NoSandbox'.");
+            eprintln!("Will wait for 15 seconds (press ctrl+c to abort now, or wait and start the bots anyways).");
+            std::thread::sleep(Duration::from_secs(15));
+        }
+    }
 
     let cli = Cli::parse();
 
@@ -288,7 +333,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     match game_config.game_type {
-        GameType::Melee(bots) => {
+        GameType::Melee(ref bots) => {
             let bots: Vec<_> = bots
                 .iter()
                 .map(|cfg| {
@@ -375,6 +420,7 @@ fn main() -> anyhow::Result<()> {
                         },
                         wmode: true,
                         game_speed: if game_config.human_speed { -1 } else { 0 },
+                        sandbox: config.sandbox.clone(),
                     })
                 } else {
                     Box::new(BwHeadless {
@@ -395,6 +441,7 @@ fn main() -> anyhow::Result<()> {
                         } else {
                             BwHeadlessConnectMode::Join
                         },
+                        sandbox: config.sandbox.clone(),
                     })
                 };
                 if host {
@@ -410,26 +457,25 @@ fn main() -> anyhow::Result<()> {
                     } else {
                         0
                     };
-                let mut cmd = bwapi_launcher.build_command(&bot.binary)?;
+                let mut cmd = bwapi_launcher.build_command(&bot.binary, &game_config)?;
                 cmd.stdout(File::create(bot.log_dir.join("game_out.log"))?)
                     .stderr(File::create(bot.log_dir.join("game_err.log"))?);
                 let mut bwapi_child = cmd
                     .spawn()
                     .expect("Could not run bwheadless (maybe deleted/blocked by a Virus Scanner?)");
 
-                let bot_out_log = File::create(bot.log_dir.join("bot_out.log"))
-                    .expect("Could not create bot output log");
-                let bot_err_log = File::create(bot.log_dir.join("bot_err.log"))
-                    .expect("Could not create bot error log");
+                let bot_out_log = File::create(bot.log_dir.join("bot_out.log"))?;
+                let bot_err_log = File::create(bot.log_dir.join("bot_err.log"))?;
                 let bot_process = match bot.binary {
                     Binary::Dll(_) => None,
                     Binary::Jar(jar) => {
-                        let mut cmd =
-                            Command::new(config.java_path.as_deref().unwrap_or("java.exe"));
+                        let mut cmd = config
+                            .sandbox
+                            .wrap_executable(config.java_path.as_deref().unwrap_or("java.exe"));
                         cmd.arg("-jar").arg(jar);
                         Some(cmd)
                     }
-                    Binary::Exe(exe) => Some(Command::new(exe)),
+                    Binary::Exe(exe) => Some(config.sandbox.wrap_executable(exe)),
                 }
                 .map(|ref mut cmd| -> anyhow::Result<Child> {
                     cmd.current_dir(bot.working_dir);
