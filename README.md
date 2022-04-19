@@ -46,3 +46,9 @@ After the game ran, check the `replays` folder for each bot - they should contai
 
 If a bot fails to work, feel free to open an issue - please include a zipped up version of that bots directory. 
 Bots older that BWAPI 4.2 might need some more setup, please make sure that it can run without `bwaishotgun`, before opening a ticket.
+
+# Additional Artifact Sources
+[bwheadless](https://github.com/Bytekeeper/bwheadless)
+[Tournament Modules](https://github.com/basil-ladder/sc-tm)
+[WMode](https://github.com/bwapi/bwapi/blob/main/Release_Binary/Chaoslauncher/Plugins/WModeReadme.txt)
+[injectory](https://github.com/blole/injectory)

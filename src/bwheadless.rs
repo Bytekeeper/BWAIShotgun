@@ -19,14 +19,12 @@ pub struct BwHeadless {
     pub game_name: Option<String>,
     pub connect_mode: BwHeadlessConnectMode,
     pub sandbox: SandboxMode,
+    pub tournament_module: Option<String>,
+    pub bot_binary: Binary,
 }
 
 impl LaunchBuilder for BwHeadless {
-    fn build_command(
-        &self,
-        bot_binary: &Binary,
-        game_config: &GameConfig,
-    ) -> anyhow::Result<Command> {
+    fn build_command(&self, game_config: &GameConfig) -> anyhow::Result<Command> {
         ensure!(
             self.starcraft_exe.exists(),
             "Could not find 'StarCraft.exe'"
@@ -53,12 +51,10 @@ impl LaunchBuilder for BwHeadless {
         let bwapi_ini = bwapi_data.join("bwapi.ini");
         let mut bwapi_ini_file = File::create(&bwapi_ini)?;
         BwapiIni {
-            ai_module: Some(match &bot_binary {
-                Binary::Dll(x) => x.to_string_lossy().to_string(),
-                Binary::Exe(_) | Binary::Jar(_) => "".to_string(),
-            }),
+            tm_module: self.tournament_module.clone(),
             ..Default::default()
         }
+        .with_binary(&self.bot_binary)
         .write(&mut bwapi_ini_file)?;
 
         let mut cmd = self.sandbox.wrap_executable(bwheadless);

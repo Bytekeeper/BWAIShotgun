@@ -62,6 +62,7 @@ impl TryFrom<Cli> for GameConfig {
                 human_host: matches!(cli.game_type.unwrap(), GameType::Human { .. }),
                 human_speed: cli.human_speed,
                 latency_frames: 3,
+                time_out_at_frame: None,
             })
         }
     }

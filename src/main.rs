@@ -7,6 +7,7 @@ mod sandbox;
 
 use anyhow::{anyhow, bail};
 use clap::Parser;
+use crc::{Crc, CRC_32_ISO_HDLC};
 use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::{Debug, Display, Formatter};
@@ -16,7 +17,7 @@ use std::process::Child;
 use std::time::Duration;
 
 use crate::botsetup::{Binary, LaunchBuilder};
-use crate::bwapi::{AutoMenu, BwapiConnectMode, BwapiIni, GameTableAccess};
+use crate::bwapi::{AutoMenu, BwapiConnectMode, BwapiIni, BwapiVersion, GameTableAccess};
 use crate::bwheadless::{BwHeadless, BwHeadlessConnectMode};
 use crate::cli::Cli;
 use crate::injectory::{Injectory, InjectoryConnectMode};
@@ -90,6 +91,7 @@ pub struct GameConfig {
     pub human_speed: bool,
     #[serde(default = "default_latency")]
     pub latency_frames: u32,
+    pub time_out_at_frame: Option<u32>,
 }
 
 fn default_latency() -> u32 {
@@ -118,9 +120,24 @@ impl GameConfig {
 }
 
 #[derive(Deserialize, Debug)]
+pub enum TournamentModule {
+    None,
+    Default,
+    Custom { prefix: String },
+}
+
+impl Default for TournamentModule {
+    fn default() -> Self {
+        Self::Default
+    }
+}
+
+#[derive(Deserialize, Debug)]
 struct BotDefinition {
     race: Race,
     executable: Option<String>,
+    #[serde(default)]
+    tournament_module: TournamentModule,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -219,6 +236,7 @@ pub struct BotProcess {
 #[derive(Debug)]
 pub struct PreparedBot {
     binary: Binary,
+    tournament_module: Option<String>,
     race: Race,
     name: String,
     working_dir: PathBuf,
@@ -239,6 +257,7 @@ impl PreparedBot {
         create_dir_all(read_path).expect("Could not create read folder");
         create_dir_all(write_path).expect("Could not create write folder");
         create_dir_all(&log_dir).expect("Could not create log folder");
+        create_dir_all(path.join("tm")).expect("Could not create tm folder");
 
         let bot_binary = definition
             .executable
@@ -256,6 +275,36 @@ impl PreparedBot {
             });
         let race = config.race.unwrap_or(definition.race);
 
+        let tournament_module = match &definition.tournament_module {
+            TournamentModule::None => None,
+            TournamentModule::Default | TournamentModule::Custom { .. } => {
+                let prefix =
+                    if let TournamentModule::Custom { prefix } = &definition.tournament_module {
+                        prefix
+                    } else {
+                        "tm"
+                    };
+
+                let bwapi_dll = bwapi_data_path.join("BWAPI.dll");
+                let bwapi_crc = Crc::<u32>::new(&CRC_32_ISO_HDLC).checksum(
+                    std::fs::read(bwapi_dll)
+                        .expect("BWAPI.dll not readable")
+                        .as_slice(),
+                );
+                let bwapi_version = BwapiVersion::from_u32(bwapi_crc);
+                if let Some(version) = bwapi_version {
+                    let version = version.version_short();
+                    let tm_name = format!("{}_{}.dll", prefix, version);
+                    std::fs::copy(base_folder().join("tm").join(&tm_name), path.join(&tm_name))
+                        .expect("Could not copy tournament module");
+                    Some(tm_name)
+                } else {
+                    println!("Custom BWAPI.dll detected, not adding TM module");
+                    None
+                }
+            }
+        };
+
         Self {
             binary: bot_binary,
             race,
@@ -266,6 +315,7 @@ impl PreparedBot {
             working_dir: path.to_path_buf(),
             log_dir,
             headful: config.headful,
+            tournament_module,
         }
     }
 }
@@ -403,6 +453,7 @@ fn main() -> anyhow::Result<()> {
                         starcraft_path: starcraft_path.clone(),
                         starcraft_exe: starcraft_exe.clone(),
                         bot_base_path: bot.working_dir.clone(),
+                        tournament_module: bot.tournament_module,
                         player_name: bot.name.clone(),
                         game_name: if game_config.human_host {
                             "JOIN_FIRST".to_string()
@@ -421,11 +472,13 @@ fn main() -> anyhow::Result<()> {
                         wmode: true,
                         game_speed: if game_config.human_speed { -1 } else { 0 },
                         sandbox: config.sandbox.clone(),
+                        bot_binary: bot.binary.clone(),
                     })
                 } else {
                     Box::new(BwHeadless {
                         starcraft_exe: starcraft_exe.clone(),
                         bot_base_path: bot.working_dir.clone(),
+                        tournament_module: bot.tournament_module,
                         bot_name: bot.name.clone(),
                         race: bot.race,
                         game_name: if game_config.human_host {
@@ -442,6 +495,7 @@ fn main() -> anyhow::Result<()> {
                             BwHeadlessConnectMode::Join
                         },
                         sandbox: config.sandbox.clone(),
+                        bot_binary: bot.binary.clone(),
                     })
                 };
                 if host {
@@ -457,9 +511,16 @@ fn main() -> anyhow::Result<()> {
                     } else {
                         0
                     };
-                let mut cmd = bwapi_launcher.build_command(&bot.binary, &game_config)?;
+                let mut cmd = bwapi_launcher.build_command(&game_config)?;
                 cmd.stdout(File::create(bot.log_dir.join("game_out.log"))?)
                     .stderr(File::create(bot.log_dir.join("game_err.log"))?);
+                let cmd = cmd
+                    .env("TM_LOG_FRAMETIMES", r"tm\frames.csv")
+                    .env("TM_LOG_RESULTS", r"tm\result.csv")
+                    .env("TM_LOG_UNIT_EVENTS", r"tm\unit_events.csv");
+                if let Some(time_out_at_frame) = game_config.time_out_at_frame {
+                    cmd.env("TM_TIME_OUT_AT_FRAME", time_out_at_frame.to_string());
+                }
                 let mut bwapi_child = cmd
                     .spawn()
                     .expect("Could not run bwheadless (maybe deleted/blocked by a Virus Scanner?)");

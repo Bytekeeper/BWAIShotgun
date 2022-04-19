@@ -4,7 +4,7 @@ use std::fs::read_dir;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Binary {
     Dll(PathBuf),
     Jar(PathBuf),
@@ -55,9 +55,5 @@ impl Binary {
 }
 
 pub trait LaunchBuilder {
-    fn build_command(
-        &self,
-        bot_binary: &Binary,
-        game_config: &GameConfig,
-    ) -> anyhow::Result<Command>;
+    fn build_command(&self, game_config: &GameConfig) -> anyhow::Result<Command>;
 }

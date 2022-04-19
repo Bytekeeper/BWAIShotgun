@@ -24,14 +24,12 @@ pub struct Injectory {
     pub wmode: bool,
     pub game_speed: i32,
     pub sandbox: SandboxMode,
+    pub tournament_module: Option<String>,
+    pub bot_binary: Binary,
 }
 
 impl LaunchBuilder for Injectory {
-    fn build_command(
-        &self,
-        bot_binary: &Binary,
-        _game_config: &GameConfig,
-    ) -> anyhow::Result<Command> {
+    fn build_command(&self, _game_config: &GameConfig) -> anyhow::Result<Command> {
         ensure!(
             self.starcraft_exe.exists(),
             "Could not find 'StarCraft.exe'"
@@ -57,10 +55,6 @@ impl LaunchBuilder for Injectory {
         let bwapi_ini = bwapi_data.join("bwapi.ini");
         let mut bwapi_ini_file = File::create(&bwapi_ini)?;
         BwapiIni {
-            ai_module: Some(match &bot_binary {
-                Binary::Dll(x) => x.to_string_lossy().to_string(),
-                Binary::Exe(_) | Binary::Jar(_) => "".to_string(),
-            }),
             auto_menu: match &self.connect_mode {
                 InjectoryConnectMode::Host { map, player_count } => AutoMenu::AutoMenu {
                     name: self.player_name.clone(),
@@ -79,8 +73,10 @@ impl LaunchBuilder for Injectory {
                 },
             },
             game_speed: self.game_speed,
-            tm_module: None,
+            tm_module: self.tournament_module.clone(),
+            ..Default::default()
         }
+        .with_binary(&self.bot_binary)
         .write(&mut bwapi_ini_file)?;
 
         // BWAPI will look for the map in the "bot" folder, not in the starcraft path, so we'll copy the map over.
