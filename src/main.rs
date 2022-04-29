@@ -1,48 +1,34 @@
+use std::collections::HashSet;
+use std::fmt::{Debug, Display, Formatter};
+use std::fs::{create_dir_all, metadata, read, remove_file, File};
+use std::path::{Path, PathBuf};
+use std::process::Child;
+use std::time::Duration;
+
+use anyhow::{anyhow, ensure, Context};
+use clap::Parser;
+use crc::{Crc, CRC_32_ISO_HDLC};
+use log::{debug, info, warn, LevelFilter};
+use registry::{Hive, Security};
+use retry::delay::Fixed;
+use retry::{retry, OperationResult};
+use serde::de::Unexpected;
+use serde::{Deserialize, Deserializer};
+use simplelog::{ColorChoice, Config, TermLogger, TerminalMode};
+
+use crate::botsetup::{Binary, BotSetup, LaunchBuilder};
+use crate::bwapi::{AutoMenu, BwapiConnectMode, BwapiIni, BwapiVersion, GameTableAccess};
+use crate::bwheadless::{BwHeadless, BwHeadlessConnectMode};
+use crate::cli::Cli;
+use crate::injectory::{Injectory, InjectoryConnectMode};
+use crate::sandbox::SandboxMode;
+
 mod botsetup;
 mod bwapi;
 mod bwheadless;
 mod cli;
 mod injectory;
 mod sandbox;
-
-use anyhow::{anyhow, bail};
-use clap::Parser;
-use crc::{Crc, CRC_32_ISO_HDLC};
-use std::collections::HashSet;
-use std::error::Error;
-use std::fmt::{Debug, Display, Formatter};
-use std::fs::{create_dir_all, metadata, read, File};
-use std::path::{Path, PathBuf};
-use std::process::Child;
-use std::time::Duration;
-
-use crate::botsetup::{Binary, LaunchBuilder};
-use crate::bwapi::{AutoMenu, BwapiConnectMode, BwapiIni, BwapiVersion, GameTableAccess};
-use crate::bwheadless::{BwHeadless, BwHeadlessConnectMode};
-use crate::cli::Cli;
-use crate::injectory::{Injectory, InjectoryConnectMode};
-use registry::{Hive, Security};
-use retry::delay::Fixed;
-use retry::{retry, OperationResult};
-use serde::de::Unexpected;
-use serde::{Deserialize, Deserializer};
-
-#[derive(Deserialize, Clone, Debug)]
-pub enum SandboxMode {
-    Unconfigured,
-    NoSandbox,
-    Sandboxie {
-        executable: PathBuf,
-        box_name: String,
-    },
-}
-
-impl Default for SandboxMode {
-    fn default() -> Self {
-        // Should be Unconfigured if we ever support bot sandboxing
-        SandboxMode::NoSandbox
-    }
-}
 
 #[derive(Deserialize, Debug, Default)]
 struct ShotgunConfig {
@@ -52,37 +38,49 @@ struct ShotgunConfig {
     sandbox: SandboxMode,
 }
 
-impl ShotgunConfig {
-    fn get_starcraft_path(&self) -> anyhow::Result<PathBuf> {
-        let path = if let Some(path) = &self.starcraft_path {
-            path.to_owned()
-        } else {
-            Hive::LocalMachine
-                .open(r"SOFTWARE\Blizzard Entertainment\Starcraft", Security::Read)?
-                .value("InstallPath")?
-                .to_string()
-        };
-        Ok(path.into())
+fn locate_starcraft() -> anyhow::Result<PathBuf> {
+    Ok(Hive::LocalMachine
+        .open(r"SOFTWARE\Blizzard Entertainment\Starcraft", Security::Read)
+        .context("Could not find Starcraft installation")?
+        .value("InstallPath")?
+        .to_string()
+        .into())
+}
+
+#[derive(Deserialize, Clone, Copy, Debug)]
+pub enum HeadfulMode {
+    Off,
+    On {
+        #[serde(default)]
+        no_wmode: bool,
+        #[serde(default)]
+        no_sound: bool,
+    },
+}
+
+impl Default for HeadfulMode {
+    fn default() -> Self {
+        Self::Off
     }
 }
 
 #[derive(Deserialize, Debug)]
-pub struct BotConfig {
+pub struct BotLaunchConfig {
     pub name: String,
     pub player_name: Option<String>,
     pub race: Option<Race>,
     #[serde(default)]
-    pub headful: bool,
+    pub headful: HeadfulMode,
 }
 
 #[derive(Deserialize, Debug)]
 pub enum GameType {
-    Melee(Vec<BotConfig>),
+    Melee(Vec<BotLaunchConfig>),
 }
 
 #[derive(Deserialize, Debug)]
 pub struct GameConfig {
-    pub map: String,
+    pub map: Option<String>,
     pub game_name: Option<String>,
     pub game_type: GameType,
     #[serde(default)]
@@ -99,21 +97,21 @@ fn default_latency() -> u32 {
 }
 
 impl GameConfig {
-    fn load(config: &ShotgunConfig) -> anyhow::Result<GameConfig> {
+    fn load(starcraft_path: &Path) -> anyhow::Result<GameConfig> {
         let result: GameConfig =
             toml::from_slice(read(base_folder().join("game.toml"))?.as_slice())
-                .map_err(|e| e.to_string())
-                .expect("'game.toml' is invalid");
-        if result.map.is_empty() && !result.human_host {
-            bail!("Map must be set for non-human hosted games");
-        }
-        let map_path_abs = Path::new(&result.map);
-        let map_path_rel = config
-            .get_starcraft_path()
-            .expect("Could not find StarCraft installation")
-            .join(&result.map);
-        if map_path_abs.is_absolute() && !map_path_abs.exists() | !map_path_rel.exists() {
-            bail!("Could not find map '{}'", result.map);
+                .context("'game.toml' is invalid")?;
+        ensure!(
+            result.human_host || matches!(&result.map, Some(s) if !s.is_empty()),
+            "Map must be set for bot-hosted games"
+        );
+        if let Some(map_path) = result.map.as_ref().map(Path::new) {
+            let map_path_rel = starcraft_path.join(map_path);
+            ensure!(
+                map_path.is_absolute() && map_path.exists() || map_path_rel.exists(),
+                "Could not find map '{}'",
+                map_path.to_string_lossy()
+            );
         }
         Ok(result)
     }
@@ -181,39 +179,6 @@ impl Display for Race {
     }
 }
 
-#[derive(Debug)]
-pub enum SGError {
-    MissingStarCraftExe(PathBuf),
-    MultipleExecutables(PathBuf),
-    ExecutableNotFound(PathBuf),
-}
-
-impl Error for SGError {}
-
-impl Display for SGError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SGError::MissingStarCraftExe(path) => {
-                write!(
-                    f,
-                    "StarCraft.exe not found here: {}",
-                    path.to_str().expect("Path not found")
-                )
-            }
-            SGError::MultipleExecutables(path) => write!(
-                f,
-                "Multiple bot executables found in '{}', please specify executable in 'bot.toml'",
-                path.to_str().expect("Path not found")
-            ),
-            SGError::ExecutableNotFound(path) => write!(
-                f,
-                "No bot executable found in '{}'",
-                path.to_str().expect("Path not found")
-            ),
-        }
-    }
-}
-
 /// bwaishotgun base folder
 pub fn base_folder() -> PathBuf {
     std::env::current_exe()
@@ -237,15 +202,20 @@ pub struct BotProcess {
 pub struct PreparedBot {
     binary: Binary,
     tournament_module: Option<String>,
+    supports_character_name: bool,
     race: Race,
     name: String,
     working_dir: PathBuf,
     log_dir: PathBuf,
-    headful: bool,
+    headful: HeadfulMode,
 }
 
 impl PreparedBot {
-    fn prepare(config: &BotConfig, path: &Path, definition: &BotDefinition) -> Self {
+    fn prepare(
+        config: &BotLaunchConfig,
+        path: &Path,
+        definition: &BotDefinition,
+    ) -> anyhow::Result<Self> {
         let bwapi_data_path = path.join("bwapi-data");
         // Workaround BWAPI 3.7.x "strangeness" of removing ":" ...
         let mut ai_module_path = bwapi_data_path.components();
@@ -254,26 +224,44 @@ impl PreparedBot {
         let read_path = bwapi_data_path.join("read");
         let write_path = bwapi_data_path.join("write");
         let log_dir = path.join("logs");
-        create_dir_all(read_path).expect("Could not create read folder");
-        create_dir_all(write_path).expect("Could not create write folder");
-        create_dir_all(&log_dir).expect("Could not create log folder");
-        create_dir_all(path.join("tm")).expect("Could not create tm folder");
+        create_dir_all(read_path).context("Could not create read folder")?;
+        create_dir_all(write_path).context("Could not create write folder")?;
+        create_dir_all(&log_dir).context("Could not create log folder")?;
+        let tm_path = path.join("tm");
+        create_dir_all(&tm_path).context("Could not create tm folder")?;
 
-        let bot_binary = definition
-            .executable
-            .as_deref()
-            .and_then(|s| {
-                // First try from bot path
-                Binary::from_path(path.join(s).as_path())
-                    // Then from base path
-                    .or_else(|| Binary::from_path(base_folder().join(s).as_path()))
-            })
+        for entry in tm_path.read_dir()?.flatten().filter(|it| {
+            it.path()
+                .extension()
+                .map(|os| os.to_string_lossy().as_ref() == "csv")
+                .unwrap_or(false)
+        }) {
+            debug!("Removing {}", entry.path().to_string_lossy());
+            remove_file(entry.path()).ok();
+        }
+
+        let bot_binary = definition.executable.as_deref().and_then(|s| {
+            // First try from bot path
+            Binary::from_path(path.join(s).as_path())
+                // Then from base path
+                .or_else(|| Binary::from_path(base_folder().join(s).as_path()))
+        });
+        let bot_binary = if let Some(bot_binary) = bot_binary {
+            bot_binary
+        } else {
             // Lastly search
-            .unwrap_or_else(|| {
-                Binary::search(ai_module_path.as_path())
-                    .expect("Could not find bot binary in 'bwapi-data/AI'")
-            });
+            Binary::search(ai_module_path.as_path())
+                .context("Could not find bot binary in 'bwapi-data/AI'")?
+        };
         let race = config.race.unwrap_or(definition.race);
+
+        let bwapi_dll = bwapi_data_path.join("BWAPI.dll");
+        let bwapi_crc = Crc::<u32>::new(&CRC_32_ISO_HDLC).checksum(
+            std::fs::read(&bwapi_dll)
+                .with_context(|| format!("Could not check '{}'", bwapi_dll.to_string_lossy()))?
+                .as_slice(),
+        );
+        let bwapi_version = BwapiVersion::from_u32(bwapi_crc);
 
         let tournament_module = match &definition.tournament_module {
             TournamentModule::None => None,
@@ -285,18 +273,16 @@ impl PreparedBot {
                         "tm"
                     };
 
-                let bwapi_dll = bwapi_data_path.join("BWAPI.dll");
-                let bwapi_crc = Crc::<u32>::new(&CRC_32_ISO_HDLC).checksum(
-                    std::fs::read(bwapi_dll)
-                        .expect("BWAPI.dll not readable")
-                        .as_slice(),
-                );
-                let bwapi_version = BwapiVersion::from_u32(bwapi_crc);
-                if let Some(version) = bwapi_version {
+                if let Some(version) = &bwapi_version {
                     let version = version.version_short();
                     let tm_name = format!("{}_{}.dll", prefix, version);
-                    std::fs::copy(base_folder().join("tm").join(&tm_name), path.join(&tm_name))
-                        .expect("Could not copy tournament module");
+                    let tm_source_file = base_folder().join("tm").join(&tm_name);
+                    std::fs::copy(&tm_source_file, path.join(&tm_name)).with_context(|| {
+                        format!(
+                            "Could not copy tournament module: '{}'",
+                            tm_source_file.to_string_lossy(),
+                        )
+                    })?;
                     Some(tm_name)
                 } else {
                     println!("Custom BWAPI.dll detected, not adding TM module");
@@ -305,7 +291,7 @@ impl PreparedBot {
             }
         };
 
-        Self {
+        Ok(Self {
             binary: bot_binary,
             race,
             name: config
@@ -316,31 +302,55 @@ impl PreparedBot {
             log_dir,
             headful: config.headful,
             tournament_module,
-        }
+            supports_character_name: !matches!(
+                bwapi_version,
+                Some(BwapiVersion::Bwapi375 | BwapiVersion::Bwapi412)
+            ),
+        })
     }
 }
 
 fn main() -> anyhow::Result<()> {
-    let config: ShotgunConfig = read(base_folder().join("shotgun.toml"))
-        .map(|cfg| {
-            toml::from_slice(cfg.as_slice())
-                .map_err(|e| e.to_string())
-                .expect("Invalid config in 'shotgun.toml'")
-        })
-        .unwrap_or_else(|_| {
-            eprintln!("shotgun.toml not found, using defaults");
-            ShotgunConfig::default()
-        });
+    TermLogger::init(
+        LevelFilter::Info,
+        Config::default(),
+        TerminalMode::Mixed,
+        ColorChoice::Auto,
+    )?;
+    info!(
+        "Welcome to {} {}",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION")
+    );
+    let ShotgunConfig {
+        starcraft_path,
+        java_path,
+        sandbox,
+    } = if let Ok(cfg) = read(base_folder().join("shotgun.toml")) {
+        toml::from_slice(cfg.as_slice()).context("'shotgun.toml' is invalid")?
+    } else {
+        warn!("'shotgun.toml' not found, using defaults");
+        ShotgunConfig::default()
+    };
+    let starcraft_path = if let Some(starcraft_path) = starcraft_path {
+        PathBuf::from(starcraft_path)
+    } else {
+        locate_starcraft()?
+    };
+    let starcraft_exe = starcraft_path.join("StarCraft.exe");
 
-    if matches!(
-        config.sandbox,
-        SandboxMode::Unconfigured | SandboxMode::NoSandbox
-    ) {
+    ensure!(
+        starcraft_exe.exists(),
+        "Could not locate 'StarCraft.exe' in configured location: '{}'",
+        starcraft_exe.to_string_lossy()
+    );
+
+    if matches!(sandbox, SandboxMode::Unconfigured | SandboxMode::NoSandbox) {
         // Currently, we don't support bot sandboxing
         // println!("You're running bots without a sandbox.");
-        if let SandboxMode::Unconfigured = config.sandbox {
-            eprintln!("If you are sure you don't want use a sandbox, please edit 'shotgun.toml' and set the sandbox to 'NoSandbox'.");
-            eprintln!("Will wait for 15 seconds (press ctrl+c to abort now, or wait and start the bots anyways).");
+        if let SandboxMode::Unconfigured = sandbox {
+            warn!("If you are sure you don't want use a sandbox, please edit 'shotgun.toml' and set the sandbox to 'NoSandbox'.");
+            warn!("Will wait for 15 seconds (press ctrl+c to abort now, or wait and start the bots anyways).");
             std::thread::sleep(Duration::from_secs(15));
         }
     }
@@ -350,41 +360,41 @@ fn main() -> anyhow::Result<()> {
     let game_config: Result<GameConfig, cli::Error> = cli.try_into();
     let game_config = match game_config {
         Ok(game_config) => game_config,
-        Err(cli::Error::NoArguments) => {
-            GameConfig::load(&config).expect("Could not load 'game.toml'")
-        }
+        Err(cli::Error::NoArguments) => GameConfig::load(&starcraft_path)?,
         Err(cli::Error::ClapError(err)) => err.exit(),
     };
 
-    let starcraft_path = config
-        .get_starcraft_path()
-        .expect("Could not find StarCraft installation");
-    let starcraft_exe = starcraft_path.join("StarCraft.exe");
     if let Ok(metadata) = metadata(starcraft_path.join("SNP_DirectIP.snp")) {
         if metadata.len() != 46100 {
-            eprintln!("The 'SNP_DirectIP.snp' in your StarCraft installation might not support more than ~6 bots per game. Overwrite with the included 'SNP_DirectIP.snp' file to support more.");
+            warn!("The 'SNP_DirectIP.snp' in your StarCraft installation might not support more than ~6 bots per game. Overwrite with the included 'SNP_DirectIP.snp' file to support more.");
         }
     } else {
-        eprintln!("Could not find 'SNP_DirectIP.snp' in your StarCraft installation, please copy the provided one or install BWAPI.");
+        warn!("Could not find 'SNP_DirectIP.snp' in your StarCraft installation, please copy the provided one or install BWAPI.");
     }
 
     let mut game_table_access = GameTableAccess::new();
-    for server_process_id in game_table_access
-        .get_game_table()
-        .iter()
-        .flat_map(|table| table.game_instances.iter())
-        .filter(|it| it.is_connected && it.server_process_id != 0)
-        .map(|it| it.server_process_id)
-    {
-        eprintln!(
+    if let Some(game_table) = game_table_access.get_game_table() {
+        warn!(
+            "Detected a stale game table. If you did not run Starcraft with BWAPI yourself, \
+        you should kill all running instances of StarCraft and any lingering bots."
+        );
+
+        for server_process_id in game_table
+            .game_instances
+            .iter()
+            .filter(|it| it.is_connected && it.server_process_id != 0)
+            .map(|it| it.server_process_id)
+        {
+            warn!(
             "The process {} is in the game table already and will interfere with game creation.",
             server_process_id
         );
+        }
     }
 
     match game_config.game_type {
         GameType::Melee(ref bots) => {
-            let bots: Vec<_> = bots
+            let bots: anyhow::Result<Vec<_>> = bots
                 .iter()
                 .map(|cfg| {
                     let mut bot_folder = base_folder();
@@ -392,34 +402,35 @@ fn main() -> anyhow::Result<()> {
                     bot_folder.push(&cfg.name);
                     let bot_definition = toml::from_slice::<BotDefinition>(
                         read(bot_folder.join("bot.toml"))
-                            .map_err(|_| {
+                            .with_context(|| {
                                 format!(
                                     "Could not read 'bot.toml' for bot '{}' in: '{}'",
                                     cfg.name,
-                                    bot_folder.to_string_lossy()
+                                    bot_folder.to_string_lossy(),
                                 )
-                            })
-                            .expect("Folder for bot not found")
+                            })?
                             .as_slice(),
-                    )
-                    .map_err(|e| e.to_string())
-                    .expect("Could not read 'bot.toml'");
+                    )?;
                     if let Some(race) = &cfg.race {
                         if bot_definition.race != Race::Random && &bot_definition.race != race {
-                            println!(
+                            info!(
                                 "Bot '{}' is configured to play as {}, but its default race is {}!",
                                 cfg.name, race, bot_definition.race
                             );
                         }
                     }
-                    (cfg, bot_folder, bot_definition)
+                    Ok((cfg, bot_folder, bot_definition))
                 })
                 .collect();
+            let bots = bots?;
             let player_count = bots.len();
-            let mut prepared_bots: Vec<_> = bots
+            let prepared_bots: anyhow::Result<Vec<_>> = bots
                 .iter()
                 .map(|(config, path, definition)| PreparedBot::prepare(config, path, definition))
                 .collect();
+            let mut prepared_bots = prepared_bots?;
+
+            // Client bots *must* be ran first, as they need to connect to their resp. BWAPI Server
             prepared_bots.sort_by_key(|bot| {
                 if matches!(bot.binary, Binary::Dll(_)) {
                     1
@@ -431,7 +442,7 @@ fn main() -> anyhow::Result<()> {
             let mut bot_names = HashSet::new();
             for bot in prepared_bots.iter().map(|it| &it.name) {
                 if !bot_names.insert(bot) {
-                    println!("'{}' was added multiple times. All instances will use the same read/write/log folders and could fail to work properly. Also headful mode will not work as expected.", bot);
+                    warn!("'{}' was added multiple times. All instances will use the same read/write/log folders and could fail to work properly. Also headful mode will not work as expected.", bot);
                 }
             }
             let mut instances = vec![];
@@ -444,23 +455,40 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or("shotgun")
                 .to_string();
             for bot in prepared_bots {
-                let bwapi_launcher: Box<dyn LaunchBuilder> = if bot.headful {
+                let bot_setup = BotSetup {
+                    starcraft_exe: starcraft_exe.clone(),
+                    starcraft_path: starcraft_exe
+                        .parent()
+                        .context("Could not find parent path of 'StarCraft.exe'")?
+                        .to_path_buf(),
+                    bot_base_path: bot.working_dir.clone(),
+                    tournament_module: bot.tournament_module.map(|s| s.into()),
+                    player_name: bot.name.clone(),
+                    race: bot.race,
+                    sandbox: sandbox.clone(),
+                    bot_binary: bot.binary.clone(),
+                };
+                let tournament_module = bot_setup.tournament_module.clone();
+                let bwapi_launcher: Box<dyn LaunchBuilder> = if !matches!(
+                    bot.headful,
+                    HeadfulMode::Off
+                ) {
                     if host {
                         // Headful + Host => All other bots need to join the game with this bots player name
-                        game_name = bot.name.clone();
+                        if bot.supports_character_name {
+                            game_name = bot.name.clone();
+                        } else {
+                            warn!("Headful hosting bot uses very old BWAPI version, please ensure there's only one character with the name 'BWAPI'.");
+                            game_name = "BWAPI".to_string();
+                        }
                     }
                     Box::new(Injectory {
-                        starcraft_path: starcraft_path.clone(),
-                        starcraft_exe: starcraft_exe.clone(),
-                        bot_base_path: bot.working_dir.clone(),
-                        tournament_module: bot.tournament_module,
-                        player_name: bot.name.clone(),
+                        bot_setup,
                         game_name: if game_config.human_host {
                             "JOIN_FIRST".to_string()
                         } else {
                             game_name.clone()
                         },
-                        race: bot.race,
                         connect_mode: if host {
                             InjectoryConnectMode::Host {
                                 map: game_config.map.clone(),
@@ -469,18 +497,13 @@ fn main() -> anyhow::Result<()> {
                         } else {
                             InjectoryConnectMode::Join
                         },
-                        wmode: true,
+                        wmode: matches!(bot.headful, HeadfulMode::On { no_wmode, .. } if !no_wmode),
+                        sound: matches!(bot.headful, HeadfulMode::On { no_sound, ..} if !no_sound),
                         game_speed: if game_config.human_speed { -1 } else { 0 },
-                        sandbox: config.sandbox.clone(),
-                        bot_binary: bot.binary.clone(),
                     })
                 } else {
                     Box::new(BwHeadless {
-                        starcraft_exe: starcraft_exe.clone(),
-                        bot_base_path: bot.working_dir.clone(),
-                        tournament_module: bot.tournament_module,
-                        bot_name: bot.name.clone(),
-                        race: bot.race,
+                        bot_setup,
                         game_name: if game_config.human_host {
                             None
                         } else {
@@ -488,21 +511,24 @@ fn main() -> anyhow::Result<()> {
                         },
                         connect_mode: if host {
                             BwHeadlessConnectMode::Host {
-                                map: game_config.map.clone(),
+                                map: game_config.map.clone().ok_or_else(|| {
+                                    anyhow!("bwheadless cannot host without a map")
+                                })?,
                                 player_count,
                             }
                         } else {
                             BwHeadlessConnectMode::Join
                         },
-                        sandbox: config.sandbox.clone(),
-                        bot_binary: bot.binary.clone(),
                     })
                 };
-                if host {
-                    println!("Hosting game with '{}'", bot.name);
-                } else {
-                    println!("Joining game with '{}'", bot.name);
-                }
+                info!(
+                    "{} game with '{}'{}",
+                    if host { "Hosting" } else { "Joining" },
+                    bot.name,
+                    tournament_module
+                        .map(|tm| format!(" (with tournament module '{}')", tm.to_string_lossy()))
+                        .unwrap_or_else(|| "".to_string())
+                );
                 host = false;
 
                 let old_connected_client_count =
@@ -521,22 +547,21 @@ fn main() -> anyhow::Result<()> {
                 if let Some(time_out_at_frame) = game_config.time_out_at_frame {
                     cmd.env("TM_TIME_OUT_AT_FRAME", time_out_at_frame.to_string());
                 }
-                let mut bwapi_child = cmd
-                    .spawn()
-                    .expect("Could not run bwheadless (maybe deleted/blocked by a Virus Scanner?)");
+                let mut bwapi_child = cmd.spawn().context(
+                    "Could not run bwheadless (maybe deleted/blocked by a Virus Scanner?)",
+                )?;
 
                 let bot_out_log = File::create(bot.log_dir.join("bot_out.log"))?;
                 let bot_err_log = File::create(bot.log_dir.join("bot_err.log"))?;
                 let bot_process = match bot.binary {
                     Binary::Dll(_) => None,
                     Binary::Jar(jar) => {
-                        let mut cmd = config
-                            .sandbox
-                            .wrap_executable(config.java_path.as_deref().unwrap_or("java.exe"));
+                        let mut cmd =
+                            sandbox.wrap_executable(java_path.as_deref().unwrap_or("java.exe"));
                         cmd.arg("-jar").arg(jar);
                         Some(cmd)
                     }
-                    Binary::Exe(exe) => Some(config.sandbox.wrap_executable(exe)),
+                    Binary::Exe(exe) => Some(sandbox.wrap_executable(exe)),
                 }
                 .map(|ref mut cmd| -> anyhow::Result<Child> {
                     cmd.current_dir(bot.working_dir);
@@ -557,7 +582,7 @@ fn main() -> anyhow::Result<()> {
                             OperationResult::Ok(())
                         } else {
                             OperationResult::Retry(
-                                "Bot client executable did not connect to BWAPI server",
+                                "Bot client executable did not connect to BWAPI server (did you try to run a human hosted game without hosting it?)",
                             )
                         }
                     })
@@ -585,12 +610,12 @@ fn main() -> anyhow::Result<()> {
                             bot.kill().ok();
                         }
                         instances.swap_remove(i);
-                        println!("{} bots remaining", instances.len());
+                        info!("{} bots remaining", instances.len());
                     }
                 }
                 std::thread::sleep(Duration::from_secs(1));
             }
-            println!("Done");
+            info!("Done");
             Ok(())
         }
     }

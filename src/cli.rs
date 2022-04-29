@@ -1,4 +1,4 @@
-use crate::{BotConfig, GameConfig};
+use crate::{BotLaunchConfig, GameConfig, HeadfulMode};
 use clap::{ErrorKind, Parser, Subcommand};
 
 #[derive(Subcommand, Debug)]
@@ -46,17 +46,17 @@ impl TryFrom<Cli> for GameConfig {
             let game_type = match cli.game_type.as_ref().expect("Game Type not set") {
                 GameType::Melee { bots } | GameType::Human { bots } => crate::GameType::Melee(
                     bots.iter()
-                        .map(|name| BotConfig {
+                        .map(|name| BotLaunchConfig {
                             name: name.to_string(),
                             player_name: None,
                             race: None,
-                            headful: false,
+                            headful: HeadfulMode::Off,
                         })
                         .collect(),
                 ),
             };
             Ok(GameConfig {
-                map: cli.map.unwrap(),
+                map: cli.map,
                 game_name: None,
                 game_type,
                 human_host: matches!(cli.game_type.unwrap(), GameType::Human { .. }),

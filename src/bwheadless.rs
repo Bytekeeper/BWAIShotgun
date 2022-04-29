@@ -1,8 +1,7 @@
-use crate::botsetup::LaunchBuilder;
-use crate::{tools_folder, Binary, BwapiIni, GameConfig, Race, SandboxMode};
-use anyhow::{anyhow, ensure};
+use crate::botsetup::{BotSetup, LaunchBuilder};
+use crate::{tools_folder, BwapiIni, GameConfig};
+use anyhow::ensure;
 use std::fs::File;
-use std::path::PathBuf;
 use std::process::Command;
 
 pub enum BwHeadlessConnectMode {
@@ -11,25 +10,18 @@ pub enum BwHeadlessConnectMode {
 }
 
 pub struct BwHeadless {
-    pub starcraft_exe: PathBuf,
-    /// Folder containing bwapi-data/AI
-    pub bot_base_path: PathBuf,
-    pub bot_name: String,
-    pub race: Race,
+    pub bot_setup: BotSetup,
     pub game_name: Option<String>,
     pub connect_mode: BwHeadlessConnectMode,
-    pub sandbox: SandboxMode,
-    pub tournament_module: Option<String>,
-    pub bot_binary: Binary,
 }
 
 impl LaunchBuilder for BwHeadless {
     fn build_command(&self, game_config: &GameConfig) -> anyhow::Result<Command> {
         ensure!(
-            self.starcraft_exe.exists(),
+            self.bot_setup.starcraft_exe.exists(),
             "Could not find 'StarCraft.exe'"
         );
-        let bwapi_data = self.bot_base_path.join("bwapi-data");
+        let bwapi_data = self.bot_setup.bot_base_path.join("bwapi-data");
         ensure!(
             bwapi_data.exists(),
             "Missing '{}' - please read the instructions on how to setup a bot.",
@@ -50,34 +42,24 @@ impl LaunchBuilder for BwHeadless {
         );
         let bwapi_ini = bwapi_data.join("bwapi.ini");
         let mut bwapi_ini_file = File::create(&bwapi_ini)?;
-        BwapiIni {
-            tm_module: self.tournament_module.clone(),
-            ..Default::default()
-        }
-        .with_binary(&self.bot_binary)
-        .write(&mut bwapi_ini_file)?;
+        BwapiIni::from(&self.bot_setup).write(&mut bwapi_ini_file)?;
 
-        let mut cmd = self.sandbox.wrap_executable(bwheadless);
-        cmd.arg("-e").arg(&self.starcraft_exe);
+        let mut cmd = self.bot_setup.sandbox.wrap_executable(bwheadless);
+        cmd.arg("-e").arg(&self.bot_setup.starcraft_exe);
         if let Some(game_name) = &self.game_name {
             cmd.arg("-g").arg(game_name);
         }
-        cmd.arg("-r").arg(&self.race.to_string());
+        cmd.arg("-r").arg(&self.bot_setup.race.to_string());
         cmd.arg("-l").arg(bwapi_dll);
-        cmd.arg("--installpath").arg(&self.bot_base_path);
-        cmd.arg("-n").arg(&self.bot_name);
+        cmd.arg("--installpath").arg(&self.bot_setup.bot_base_path);
+        cmd.arg("-n").arg(&self.bot_setup.player_name);
         cmd.arg("-gs").arg(game_config.latency_frames.to_string());
         // Newer versions of BWAPI no longer use the registry key (aka installpath) - but allow overriding the bwapi_ini location.
         cmd.env("BWAPI_CONFIG_INI", &*bwapi_ini.to_string_lossy());
-        cmd.current_dir(&self.bot_base_path);
-        let starcraft_path = self
-            .starcraft_exe
-            .parent()
-            .ok_or(anyhow!("Folder containing 'StarCraft.exe' not found"))?;
-
+        cmd.current_dir(&self.bot_setup.bot_base_path);
         match &self.connect_mode {
             BwHeadlessConnectMode::Host { map, player_count } => {
-                cmd.arg("-m").arg(starcraft_path.join(map));
+                cmd.arg("-m").arg(self.bot_setup.starcraft_path.join(map));
                 cmd.arg("-h").arg(player_count.to_string());
             }
             BwHeadlessConnectMode::Join => {}

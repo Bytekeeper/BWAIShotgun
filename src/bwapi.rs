@@ -1,7 +1,9 @@
+use crate::botsetup::BotSetup;
 use crate::{Binary, Race};
 use shared_memory::*;
 use std::io::Write;
 use std::mem::size_of;
+use std::path::PathBuf;
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum BwapiVersion {
@@ -48,7 +50,7 @@ pub struct GameTable {
 }
 
 pub struct GameTableAccess {
-    pub game_table: Option<Shmem>,
+    game_table: Option<Shmem>,
 }
 
 impl GameTableAccess {
@@ -73,6 +75,7 @@ impl GameTableAccess {
     pub fn get_connected_client_count(&mut self) -> usize {
         self.get_game_table()
             .map(|table| {
+                // eprintln!("{:#?}", table);
                 table
                     .game_instances
                     .iter()
@@ -84,7 +87,10 @@ impl GameTableAccess {
 }
 
 pub enum BwapiConnectMode {
-    Host { map: String, player_count: usize },
+    Host {
+        map: Option<String>,
+        player_count: usize,
+    },
     Join,
 }
 
@@ -110,26 +116,29 @@ impl Default for AutoMenu {
 #[derive(Default)]
 pub struct BwapiIni {
     pub ai_module: String,
-    pub tm_module: Option<String>,
+    pub tm_module: Option<PathBuf>,
     // default: 0 - full throttle
     pub game_speed: i32,
+    pub sound: bool,
     pub auto_menu: AutoMenu,
 }
 
 impl BwapiIni {
-    pub fn with_binary(mut self, binary: &Binary) -> Self {
-        self.ai_module = match binary {
-            Binary::Dll(x) => x.to_string_lossy().to_string(),
-            Binary::Exe(_) | Binary::Jar(_) => "".to_string(),
-        };
-        self
+    pub fn from(bot_setup: &BotSetup) -> Self {
+        Self {
+            ai_module: match &bot_setup.bot_binary {
+                Binary::Dll(x) => x.to_string_lossy().to_string(),
+                Binary::Exe(_) | Binary::Jar(_) => "".to_string(),
+            },
+            tm_module: bot_setup.tournament_module.clone(),
+            ..Default::default()
+        }
     }
-
     pub fn write(&self, out: &mut impl Write) -> std::io::Result<()> {
         writeln!(out, "[ai]")?;
         writeln!(out, "ai = {}", self.ai_module)?;
         if let Some(tm) = &self.tm_module {
-            writeln!(out, "tournament = {}", tm)?;
+            writeln!(out, "tournament = {}", tm.to_string_lossy())?;
         }
         writeln!(out, "[auto_menu]")?;
         match &self.auto_menu {
@@ -146,7 +155,9 @@ impl BwapiIni {
                 writeln!(out, "race={}", race)?;
                 match connect_mode {
                     BwapiConnectMode::Host { map, player_count } => {
-                        writeln!(out, "map={}", map)?;
+                        if let Some(map_name) = map {
+                            writeln!(out, "map={}", map_name)?;
+                        }
                         writeln!(out, "wait_for_min_players={}", player_count)?;
                         writeln!(out, "wait_for_max_players={}", player_count)?;
                     }
@@ -162,7 +173,8 @@ impl BwapiIni {
         )?;
         writeln!(out, "[starcraft]")?;
         writeln!(out, "speed_override = {}", self.game_speed)?;
-        writeln!(out, "sound = OFF")
+        let sound = if self.sound { "ON" } else { "OFF" };
+        writeln!(out, "sound = {sound}")
     }
 }
 

@@ -5,3 +5,9 @@
 
 # Path of bot executable (if not automatically detected)
 #executable='bwapi-data\AI\ExampleAIModule.dll'
+
+# Disable the tournament module
+#tournament_module = 'None'
+
+# Use custom tournament module (which will be suffixed by '_<bwapi-version>.dll', ie. aa_440.dll)
+#tournament_module = { Custom = { prefix = 'aa' }}

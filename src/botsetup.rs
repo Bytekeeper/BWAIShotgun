@@ -1,8 +1,24 @@
-use crate::GameConfig;
+use crate::{GameConfig, Race, SandboxMode};
 use anyhow::bail;
 use std::fs::read_dir;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+pub trait LaunchBuilder {
+    fn build_command(&self, game_config: &GameConfig) -> anyhow::Result<Command>;
+}
+
+#[derive(Debug)]
+pub struct BotSetup {
+    pub starcraft_exe: PathBuf,
+    pub starcraft_path: PathBuf,
+    pub player_name: String,
+    pub bot_binary: Binary,
+    pub bot_base_path: PathBuf,
+    pub tournament_module: Option<PathBuf>,
+    pub race: Race,
+    pub sandbox: SandboxMode,
+}
 
 #[derive(Clone, Debug)]
 pub enum Binary {
@@ -52,8 +68,4 @@ impl Binary {
             Some(x) => Ok(x),
         }
     }
-}
-
-pub trait LaunchBuilder {
-    fn build_command(&self, game_config: &GameConfig) -> anyhow::Result<Command>;
 }
