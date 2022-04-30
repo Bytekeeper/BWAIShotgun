@@ -531,12 +531,6 @@ fn main() -> anyhow::Result<()> {
                 );
                 host = false;
 
-                let old_connected_client_count =
-                    if matches!(bot.binary, Binary::Exe(_) | Binary::Dll(_)) {
-                        game_table_access.get_connected_client_count()
-                    } else {
-                        0
-                    };
                 let mut cmd = bwapi_launcher.build_command(&game_config)?;
                 cmd.stdout(File::create(bot.log_dir.join("game_out.log"))?)
                     .stderr(File::create(bot.log_dir.join("game_err.log"))?);
@@ -564,6 +558,15 @@ fn main() -> anyhow::Result<()> {
                     Binary::Exe(exe) => Some(sandbox.wrap_executable(exe)),
                 }
                 .map(|ref mut cmd| -> anyhow::Result<Child> {
+                    // Wait for server to be ready to accept connections
+                    retry(Fixed::from_millis(100).take(100), || {
+                        if game_table_access.has_free_slot() {
+                            OperationResult::Ok(())
+                        } else {
+                            OperationResult::Retry("Server process not ready")
+                        }
+                    }).map_err(|e| anyhow!(e))?;
+
                     cmd.current_dir(bot.working_dir);
                     cmd.stdout(bot_out_log);
                     cmd.stderr(bot_err_log);
@@ -572,13 +575,12 @@ fn main() -> anyhow::Result<()> {
 
                     // Wait up to 10 seconds before bailing
                     retry(Fixed::from_millis(100).take(100), || {
-                        let found = game_table_access.get_connected_client_count()
-                            > old_connected_client_count;
+                        let slots_filled = game_table_access.all_slots_filled();
                         if !matches!(bwapi_child.try_wait(), Ok(None)) {
                             OperationResult::Err("BWAPI process died")
                         } else if !matches!(child.try_wait(), Ok(None)) {
                             OperationResult::Err("Bot process died")
-                        } else if found {
+                        } else if slots_filled {
                             OperationResult::Ok(())
                         } else {
                             OperationResult::Retry(

@@ -2,6 +2,7 @@
 #race="Terran"
 #race="Protoss"
 #race="Zerg"
+#race="Random"
 
 # Path of bot executable (if not automatically detected)
 #executable='bwapi-data\AI\ExampleAIModule.dll'

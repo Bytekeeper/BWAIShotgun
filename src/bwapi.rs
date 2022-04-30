@@ -72,17 +72,27 @@ impl GameTableAccess {
             .map(|shmem| unsafe { *(shmem.as_ptr() as *const GameTable) })
     }
 
-    pub fn get_connected_client_count(&mut self) -> usize {
+    pub fn all_slots_filled(&mut self) -> bool {
         self.get_game_table()
             .map(|table| {
                 // eprintln!("{:#?}", table);
+                !table
+                    .game_instances
+                    .iter()
+                    .any(|it| it.server_process_id != 0 && !it.is_connected)
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn has_free_slot(&mut self) -> bool {
+        self.get_game_table()
+            .map(|table| {
                 table
                     .game_instances
                     .iter()
-                    .filter(|it| it.is_connected)
-                    .count()
+                    .any(|it| it.server_process_id != 0 && !it.is_connected)
             })
-            .unwrap_or(0)
+            .unwrap_or(false)
     }
 }
 

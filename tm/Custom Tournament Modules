@@ -1,0 +1,2 @@
+Just compile for each BWAPI version you like to support and add them here.
+Be sure to name them <prefix>_<bwapiversion>.dll and use the prefix in the 'bot.toml' files
