@@ -11,7 +11,7 @@ map = 'maps\BroodWar\SomeMap.scm'
 #game_type = { Melee = [{name = "NitekatT", race = "Protoss"}, {name = "NitekatT", headful = { On = {no_sound = "true", no_wmode = "true"} }}, {name = "MarineHell"}, {name = "ZergHell"}] }
 game_type = { Melee = [{name = "NitekatT", race = "Protoss"}, {name = "NitekatT"}, {name = "MarineHell"}, {name = "ZergHell"}] }
 
-# Force stop games at this frame (85714 = 1 hour)
+# Force stop games at this frame (85714 = 1 hour, requires a Tournament Module to be active)
 # time_out_at_frame = 85714
 
 # This one will run NiteKatT and ZergHell in a window, so you can observe

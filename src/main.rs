@@ -9,7 +9,6 @@ use anyhow::{anyhow, ensure, Context};
 use clap::Parser;
 use crc::{Crc, CRC_32_ISO_HDLC};
 use log::{debug, info, warn, LevelFilter};
-use registry::{Hive, Security};
 use retry::delay::Fixed;
 use retry::{retry, OperationResult};
 use serde::de::Unexpected;
@@ -22,6 +21,7 @@ use crate::bwheadless::{BwHeadless, BwHeadlessConnectMode};
 use crate::cli::Cli;
 use crate::injectory::{Injectory, InjectoryConnectMode};
 use crate::sandbox::SandboxMode;
+use crate::setup::StarCraftInstallation;
 
 mod botsetup;
 mod bwapi;
@@ -29,22 +29,15 @@ mod bwheadless;
 mod cli;
 mod injectory;
 mod sandbox;
+mod setup;
 
 #[derive(Deserialize, Debug, Default)]
 struct ShotgunConfig {
-    starcraft_path: Option<String>,
+    #[serde(default)]
+    starcraft_path: StarCraftInstallation,
     java_path: Option<String>,
     #[serde(default)]
     sandbox: SandboxMode,
-}
-
-fn locate_starcraft() -> anyhow::Result<PathBuf> {
-    Ok(Hive::LocalMachine
-        .open(r"SOFTWARE\Blizzard Entertainment\Starcraft", Security::Read)
-        .context("Could not find Starcraft installation")?
-        .value("InstallPath")?
-        .to_string()
-        .into())
 }
 
 #[derive(Deserialize, Clone, Copy, Debug)]
@@ -192,6 +185,15 @@ pub fn base_folder() -> PathBuf {
 pub fn tools_folder() -> PathBuf {
     base_folder().join("tools")
 }
+pub fn internal_scbw_folder() -> PathBuf {
+    base_folder().join("scbw")
+}
+
+pub fn download_folder() -> anyhow::Result<PathBuf> {
+    let download_folder = base_folder().join("download");
+    create_dir_all(&download_folder)?;
+    Ok(download_folder)
+}
 
 pub struct BotProcess {
     bwheadless: Child,
@@ -332,11 +334,7 @@ fn main() -> anyhow::Result<()> {
         warn!("'shotgun.toml' not found, using defaults");
         ShotgunConfig::default()
     };
-    let starcraft_path = if let Some(starcraft_path) = starcraft_path {
-        PathBuf::from(starcraft_path)
-    } else {
-        locate_starcraft()?
-    };
+    let starcraft_path = starcraft_path.ensure_path()?;
     let starcraft_exe = starcraft_path.join("StarCraft.exe");
 
     ensure!(
@@ -431,13 +429,7 @@ fn main() -> anyhow::Result<()> {
             let mut prepared_bots = prepared_bots?;
 
             // Client bots *must* be ran first, as they need to connect to their resp. BWAPI Server
-            prepared_bots.sort_by_key(|bot| {
-                if matches!(bot.binary, Binary::Dll(_)) {
-                    1
-                } else {
-                    0
-                }
-            });
+            prepared_bots.sort_by_key(|bot| matches!(bot.binary, Binary::Dll(_)));
 
             let mut bot_names = HashSet::new();
             for bot in prepared_bots.iter().map(|it| &it.name) {
@@ -457,10 +449,7 @@ fn main() -> anyhow::Result<()> {
             for bot in prepared_bots {
                 let bot_setup = BotSetup {
                     starcraft_exe: starcraft_exe.clone(),
-                    starcraft_path: starcraft_exe
-                        .parent()
-                        .context("Could not find parent path of 'StarCraft.exe'")?
-                        .to_path_buf(),
+                    starcraft_path: starcraft_path.clone(),
                     bot_base_path: bot.working_dir.clone(),
                     tournament_module: bot.tournament_module.map(|s| s.into()),
                     player_name: bot.name.clone(),

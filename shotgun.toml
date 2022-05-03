@@ -1,5 +1,12 @@
-# Starcraft path (where StarCraft.exe is located) - if unset, looks for an installed Starcraft
-starcraft_path = 'C:\...\StarCraft'
+# Configuration to find StarCraft
+# Search in registry
+starcraft_path = { Search = {} }
+
+# By direct path
+#starcraft_path = { Path = 'C:\...\StarCraft'}
+
+# Download StarCraft into the 'scbw' folder in BWAIShotgun
+#starcraft_path = { Internal = {} }
 
 # Java executable to use for java bots
 # java_path = '...\java.exe'
