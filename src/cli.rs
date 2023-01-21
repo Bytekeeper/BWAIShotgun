@@ -1,5 +1,5 @@
 use crate::{BotLaunchConfig, GameConfig, HeadfulMode};
-use clap::{ErrorKind, Parser, Subcommand};
+use clap::{error::ErrorKind, Parser, Subcommand};
 
 #[derive(Subcommand, Debug)]
 enum GameType {

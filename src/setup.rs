@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{ensure, Context};
 use hex_literal::hex;
 use log::info;
+#[cfg(target_os = "windows")]
 use registry::{Hive, Security};
 use sha2::{Digest, Sha256};
 use zip::ZipArchive;
@@ -91,12 +92,17 @@ impl StarCraftInstallation {
     }
 
     fn locate_starcraft() -> anyhow::Result<PathBuf> {
-        Ok(Hive::LocalMachine
-            .open(r"SOFTWARE\Blizzard Entertainment\Starcraft", Security::Read)
-            .context("Could not find Starcraft installation")?
-            .value("InstallPath")?
-            .to_string()
-            .into())
+        #[cfg(target_os = "windows")]
+        {
+            Ok(Hive::LocalMachine
+                .open(r"SOFTWARE\Blizzard Entertainment\Starcraft", Security::Read)
+                .context("Could not find Starcraft installation")?
+                .value("InstallPath")?
+                .to_string()
+                .into())
+        }
+        #[cfg(not(target_os = "windows"))]
+        anyhow::bail!("Only supported in Windows")
     }
 
     fn check_scbw_zip_hash(file: &Path) -> anyhow::Result<bool> {

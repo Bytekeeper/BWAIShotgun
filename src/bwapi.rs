@@ -59,6 +59,7 @@ impl GameTableAccess {
     }
 
     pub fn get_game_table(&mut self) -> Option<GameTable> {
+        #[cfg(target_os = "windows")]
         if self.game_table.is_none() {
             let shmmem = ShmemConf::new()
                 .size(size_of::<GameTable>())
