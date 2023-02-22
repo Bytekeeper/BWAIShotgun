@@ -1,3 +1,6 @@
+[workspace]
+members = ["game_table"]
+
 [package]
 name = "bwaishotgun"
 version = "0.5.0"
@@ -6,20 +9,26 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-toml = "0.5"
-serde = {version = "1.0", features = ["derive"]}
+toml = "0.7"
+serde = { version = "1.0", features = ["derive"] }
 registry = "1.2"
-anyhow = "1.0"
+anyhow = { version = "1.0", features = ["backtrace"] }
 shared_memory = "0.12"
 retry = "2.0"
 reqwest = { version = "0.11", features = ["blocking", "json"] }
 zip = "0.6"
-clap = { version = "4.1", features = ["derive"]}
+clap = { version = "4.1", features = ["derive"] }
 crc = "3.0"
 sha2 = "0.10"
-hex-literal = "0.3"
 log = "0.4"
 simplelog = "0.12"
+hex-literal = "0.3.4"
+game_table = { path = "game_table" }
+
+[target.'cfg(not(windows))'.dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
 
 [profile.release]
 lto = true
+strip = "debuginfo"

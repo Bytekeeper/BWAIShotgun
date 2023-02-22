@@ -18,11 +18,11 @@ enum GameType {
 #[derive(Parser, Debug)]
 pub struct Cli {
     /// Absolute path of map to host
-    #[clap(short, long)]
+    #[arg(short, long)]
     map: Option<String>,
     #[clap(subcommand)]
     game_type: Option<GameType>,
-    #[clap(short, long)]
+    #[arg(short = 's', long)]
     human_speed: bool,
 }
 

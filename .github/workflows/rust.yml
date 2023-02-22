@@ -14,9 +14,16 @@ jobs:
 
     runs-on: ubuntu-latest
 
-    steps:
+    steps:  
+    - run: sudo apt-get install mingw-w64
+    - run: rustup target add i686-pc-windows-gnu
     - uses: actions/checkout@v3
     - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+      run: make
+    - run: 7za a -- bwaishotgun-linux.7z target/x86_64-unknown-linux-gnu/release/bwaishotgun target/i686-pc-windows-gnu/release/game_table.exe bots tools tm SNP_DirectIP.snp game.toml shotgun.toml
+    - run: 7za rn -- bwaishotgun-linux.7z target/x86_64-unknown-linux-gnu/release/bwaishotgun BWAIShotgun
+    - run: 7za rn -- bwaishotgun-linux.7z target/i686-pc-windows-gnu/release/game_table.exe tools/game_table.exe
+    - name: 'Upload Release Candidate'
+      uses: actions/upload-artifact@v3
+      with:
+        path: bwaishotgun-linux.7z
