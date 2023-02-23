@@ -1,9 +1,68 @@
 use crate::botsetup::BotSetup;
-use crate::{Binary, Race};
-use shared_memory::*;
+use crate::{tools_folder, Binary, Race};
+use anyhow::Context;
+use game_table::GameTable;
+use log::trace;
 use std::io::Write;
-use std::mem::size_of;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
+
+pub struct GameTableAccess {
+    #[cfg(target_os = "windows")]
+    delegate: game_table::GameTableAccess,
+}
+
+impl GameTableAccess {
+    pub fn new() -> Self {
+        Self {
+            #[cfg(target_os = "windows")]
+            delegate: game_table::GameTableAccess::new(),
+        }
+    }
+
+    pub fn get_game_table(&mut self) -> Option<GameTable> {
+        #[cfg(target_os = "windows")]
+        {
+            self.delegate.get_game_table()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let output = Command::new("wine")
+                .arg(tools_folder().join("game_table.exe"))
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .context("Executing game_table.exe with wine")
+                .expect("Unable to execute game_table.exe with wine");
+            let res = serde_json::from_slice(&output.stdout).ok();
+            trace!("{res:?}");
+            res
+        }
+    }
+
+    pub fn all_slots_filled(&mut self) -> bool {
+        self.get_game_table()
+            .map(|table| {
+                // eprintln!("{:#?}", table);
+                !table
+                    .game_instances
+                    .iter()
+                    .any(|it| it.server_process_id != 0 && !it.is_connected)
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn has_free_slot(&mut self) -> bool {
+        self.get_game_table()
+            .map(|table| {
+                table
+                    .game_instances
+                    .iter()
+                    .any(|it| it.server_process_id != 0 && !it.is_connected)
+            })
+            .unwrap_or(false)
+    }
+}
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum BwapiVersion {
@@ -32,68 +91,6 @@ impl BwapiVersion {
             Self::Bwapi420 => "420",
             Self::Bwapi440 => "440",
         }
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct GameInstance {
-    pub server_process_id: u32,
-    pub is_connected: bool,
-    pub last_keep_alive_time: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct GameTable {
-    pub game_instances: [GameInstance; 8],
-}
-
-pub struct GameTableAccess {
-    game_table: Option<Shmem>,
-}
-
-impl GameTableAccess {
-    pub fn new() -> Self {
-        Self { game_table: None }
-    }
-
-    pub fn get_game_table(&mut self) -> Option<GameTable> {
-        #[cfg(target_os = "windows")]
-        if self.game_table.is_none() {
-            let shmmem = ShmemConf::new()
-                .size(size_of::<GameTable>())
-                .allow_raw(true)
-                .os_id(r"Local\bwapi_shared_memory_game_list")
-                .open();
-            self.game_table = shmmem.ok();
-        }
-        self.game_table
-            .as_ref()
-            .map(|shmem| unsafe { *(shmem.as_ptr() as *const GameTable) })
-    }
-
-    pub fn all_slots_filled(&mut self) -> bool {
-        self.get_game_table()
-            .map(|table| {
-                // eprintln!("{:#?}", table);
-                !table
-                    .game_instances
-                    .iter()
-                    .any(|it| it.server_process_id != 0 && !it.is_connected)
-            })
-            .unwrap_or(false)
-    }
-
-    pub fn has_free_slot(&mut self) -> bool {
-        self.get_game_table()
-            .map(|table| {
-                table
-                    .game_instances
-                    .iter()
-                    .any(|it| it.server_process_id != 0 && !it.is_connected)
-            })
-            .unwrap_or(false)
     }
 }
 
@@ -162,18 +159,18 @@ impl BwapiIni {
             } => {
                 writeln!(out, "auto_menu=LAN")?;
                 writeln!(out, "lan_mode=Local PC")?;
-                writeln!(out, "character_name={}", name)?;
-                writeln!(out, "race={}", race)?;
+                writeln!(out, "character_name={name}")?;
+                writeln!(out, "race={race}")?;
                 match connect_mode {
                     BwapiConnectMode::Host { map, player_count } => {
                         if let Some(map_name) = map {
-                            writeln!(out, "map={}", map_name)?;
+                            writeln!(out, "map={map_name}")?;
                         }
-                        writeln!(out, "wait_for_min_players={}", player_count)?;
-                        writeln!(out, "wait_for_max_players={}", player_count)?;
+                        writeln!(out, "wait_for_min_players={player_count}")?;
+                        writeln!(out, "wait_for_max_players={player_count}")?;
                     }
                     BwapiConnectMode::Join => {
-                        writeln!(out, "game={}", game_name)?;
+                        writeln!(out, "game={game_name}")?;
                     }
                 }
             }

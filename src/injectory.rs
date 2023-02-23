@@ -89,7 +89,7 @@ impl LaunchBuilder for Injectory {
             copy(original_map, tmp_map)?;
         }
 
-        let mut cmd = self.bot_setup.sandbox.wrap_executable(injectory);
+        let mut cmd = self.bot_setup.wrapper.wrap_executable(injectory);
         cmd.arg("-l").arg(&self.bot_setup.starcraft_exe);
         cmd.arg("-i")
             .args([tools_folder().join("oldbwapi.dll"), bwapi_dll]);

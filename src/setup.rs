@@ -1,3 +1,4 @@
+use log::debug;
 use serde::Deserialize;
 use std::fs::{create_dir_all, File};
 use std::io::copy;
@@ -14,8 +15,12 @@ use zip::ZipArchive;
 use crate::{base_folder, download_folder, internal_scbw_folder};
 
 const SCBW_URL: &str = "http://www.cs.mun.ca/~dchurchill/startcraft/scbw_bwapi440.zip";
-const SCBW_ZIP_HASH: [u8; 32] =
-    hex!("C7FB49E6C170270192ABA1610F25105BF077A52E556B7A4E684484079FA9FA93");
+const SCBW_ZIP_HASHES: [[u8; 32]; 2] = [
+    // "Original hash"
+    hex!("C7FB49E6C170270192ABA1610F25105BF077A52E556B7A4E684484079FA9FA93"),
+    // "Hash after 2023-01-25, bwapi.ini was modified
+    hex!("4546155ECFEBD50F72DC407041EC0B65282AEFDF083E58F96C29F55B75EB0C0E"),
+];
 
 #[derive(Deserialize, Debug)]
 pub enum StarCraftInstallation {
@@ -26,7 +31,10 @@ pub enum StarCraftInstallation {
 
 impl Default for StarCraftInstallation {
     fn default() -> Self {
-        Self::Search
+        #[cfg(target_os = "windows")]
+        return Self::Search;
+        #[cfg(not(target_os = "windows"))]
+        return Self::Internal;
     }
 }
 
@@ -47,7 +55,9 @@ impl StarCraftInstallation {
                             path.to_string_lossy()
                         );
                         let mut file = File::create(&path)?;
-                        reqwest::blocking::get(SCBW_URL)?.copy_to(&mut file)?;
+                        let dl_bytes = reqwest::blocking::get(SCBW_URL)?.copy_to(&mut file)?;
+                        debug!("Downloaded scbw distribution: {dl_bytes} bytes");
+                        file.sync_data()?;
                         ensure!(
                             Self::check_scbw_zip_hash(&path)?,
                             "Hash check of downloaded SCBW failed, aborting!"
@@ -114,6 +124,6 @@ impl StarCraftInstallation {
         let mut hasher = Sha256::new();
         copy(&mut file, &mut hasher)?;
         let hash = hasher.finalize();
-        Ok(hash.as_slice() == SCBW_ZIP_HASH)
+        Ok(SCBW_ZIP_HASHES.contains(hash.as_ref()))
     }
 }

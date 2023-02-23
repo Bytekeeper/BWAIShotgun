@@ -1,5 +1,6 @@
-use crate::{GameConfig, Race, SandboxMode};
-use anyhow::bail;
+use crate::{ExecutionWrapper, GameConfig, Race};
+use anyhow::{bail, Context};
+use log::debug;
 use std::fs::read_dir;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,7 +18,7 @@ pub struct BotSetup {
     pub bot_base_path: PathBuf,
     pub tournament_module: Option<PathBuf>,
     pub race: Race,
-    pub sandbox: SandboxMode,
+    pub wrapper: ExecutionWrapper,
 }
 
 #[derive(Clone, Debug)]
@@ -46,7 +47,11 @@ impl Binary {
 
     pub(crate) fn search(search_path: &Path) -> anyhow::Result<Self> {
         let mut executable = None;
-        for file in read_dir(search_path)?.flatten() {
+        debug!("Searching for bot in '{}'", search_path.display());
+        for file in read_dir(search_path)
+            .with_context(|| format!("Could not search in {}", search_path.display()))?
+            .flatten()
+        {
             let path = file.path();
             if let Some(detected_binary) = Binary::from_path(&path) {
                 executable = Some(match (executable, detected_binary) {

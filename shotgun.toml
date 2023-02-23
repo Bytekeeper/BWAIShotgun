@@ -1,6 +1,6 @@
 # Configuration to find StarCraft
 # Search in registry
-starcraft_path = { Search = {} }
+#starcraft_path = { Search = {} }
 
 # By direct path
 #starcraft_path = { Path = 'C:\...\StarCraft'}

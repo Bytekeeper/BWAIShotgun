@@ -1,8 +1,9 @@
 use std::collections::HashSet;
 use std::fmt::{Debug, Display, Formatter};
-use std::fs::{create_dir_all, metadata, read, remove_file, File};
+use std::fs::{create_dir_all, metadata, read_to_string, remove_file, File};
 use std::path::{Path, PathBuf};
 use std::process::Child;
+use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::{anyhow, ensure, Context};
@@ -20,16 +21,16 @@ use crate::bwapi::{AutoMenu, BwapiConnectMode, BwapiIni, BwapiVersion, GameTable
 use crate::bwheadless::{BwHeadless, BwHeadlessConnectMode};
 use crate::cli::Cli;
 use crate::injectory::{Injectory, InjectoryConnectMode};
-use crate::sandbox::SandboxMode;
 use crate::setup::StarCraftInstallation;
+use crate::wrapper::ExecutionWrapper;
 
 mod botsetup;
 mod bwapi;
 mod bwheadless;
 mod cli;
 mod injectory;
-mod sandbox;
 mod setup;
+mod wrapper;
 
 #[derive(Deserialize, Debug, Default)]
 struct ShotgunConfig {
@@ -37,7 +38,7 @@ struct ShotgunConfig {
     starcraft_path: StarCraftInstallation,
     java_path: Option<String>,
     #[serde(default)]
-    sandbox: SandboxMode,
+    wrapper: ExecutionWrapper,
 }
 
 #[derive(Deserialize, Clone, Copy, Debug)]
@@ -91,9 +92,14 @@ fn default_latency() -> u32 {
 
 impl GameConfig {
     fn load(starcraft_path: &Path) -> anyhow::Result<GameConfig> {
-        let result: GameConfig =
-            toml::from_slice(read(base_folder().join("game.toml"))?.as_slice())
-                .context("'game.toml' is invalid")?;
+        let game_toml_path = base_folder().join("game.toml");
+        debug!("Loading {}", game_toml_path.display());
+        let result: GameConfig = toml::from_str(
+            read_to_string(game_toml_path)
+                .context("'game.toml' is missing")?
+                .as_str(),
+        )
+        .context("'game.toml' is invalid")?;
         ensure!(
             result.human_host || matches!(&result.map, Some(s) if !s.is_empty()),
             "Map must be set for bot-hosted games"
@@ -219,8 +225,10 @@ impl PreparedBot {
         definition: &BotDefinition,
     ) -> anyhow::Result<Self> {
         let bwapi_data_path = path.join("bwapi-data");
-        // Workaround BWAPI 3.7.x "strangeness" of removing ":" ...
         let mut ai_module_path = bwapi_data_path.components();
+        // Workaround BWAPI 3.7.x "strangeness" of removing ":" ..., we'll do it for windows only
+        // for obvious reasons
+        #[cfg(target_os = "windows")]
         ai_module_path.next();
         let ai_module_path = ai_module_path.as_path().join("AI");
         let read_path = bwapi_data_path.join("read");
@@ -272,12 +280,12 @@ impl PreparedBot {
                     if let TournamentModule::Custom { prefix } = &definition.tournament_module {
                         prefix
                     } else {
-                        "tm"
+                        "TM"
                     };
 
                 if let Some(version) = &bwapi_version {
                     let version = version.version_short();
-                    let tm_name = format!("{}_{}.dll", prefix, version);
+                    let tm_name = format!("{prefix}_{version}.dll");
                     let tm_source_file = base_folder().join("tm").join(&tm_name);
                     std::fs::copy(&tm_source_file, path.join(&tm_name)).with_context(|| {
                         format!(
@@ -314,7 +322,10 @@ impl PreparedBot {
 
 fn main() -> anyhow::Result<()> {
     TermLogger::init(
-        LevelFilter::Info,
+        std::env::var("LOG_LEVEL")
+            .ok()
+            .and_then(|level| LevelFilter::from_str(&level).ok())
+            .unwrap_or(LevelFilter::Info),
         Config::default(),
         TerminalMode::Mixed,
         ColorChoice::Auto,
@@ -327,9 +338,9 @@ fn main() -> anyhow::Result<()> {
     let ShotgunConfig {
         starcraft_path,
         java_path,
-        sandbox,
-    } = if let Ok(cfg) = read(base_folder().join("shotgun.toml")) {
-        toml::from_slice(cfg.as_slice()).context("'shotgun.toml' is invalid")?
+        wrapper,
+    } = if let Ok(cfg) = read_to_string(base_folder().join("shotgun.toml")) {
+        toml::from_str(cfg.as_str()).context("'shotgun.toml' is invalid")?
     } else {
         warn!("'shotgun.toml' not found, using defaults");
         ShotgunConfig::default()
@@ -343,13 +354,26 @@ fn main() -> anyhow::Result<()> {
         starcraft_exe.to_string_lossy()
     );
 
-    if matches!(sandbox, SandboxMode::Unconfigured | SandboxMode::NoSandbox) {
-        // Currently, we don't support bot sandboxing
-        // println!("You're running bots without a sandbox.");
-        if let SandboxMode::Unconfigured = sandbox {
-            warn!("If you are sure you don't want use a sandbox, please edit 'shotgun.toml' and set the sandbox to 'NoSandbox'.");
+    match wrapper {
+        ExecutionWrapper::Unconfigured => {
+            // Currently, we don't support bot sandboxing
+            // println!("You're running bots without a sandbox.");
+            warn!("If you are sure you don't want use a sandbox, please edit 'shotgun.toml' and set the sandbox to 'NoWrapper'.");
             warn!("Will wait for 15 seconds (press ctrl+c to abort now, or wait and start the bots anyways).");
             std::thread::sleep(Duration::from_secs(15));
+        }
+        ExecutionWrapper::Wine => {
+            debug!("Launching wineserver");
+            std::process::Command::new("wineserver")
+                .arg("-p")
+                .spawn()
+                .expect("Could not launch wine server successfully");
+        }
+        ExecutionWrapper::Sandboxie { .. } => {
+            anyhow::bail!("Sandboxie support is WIP. Please use a sandbox or virtual machine for BWAIShotgun itself for now.");
+        }
+        ExecutionWrapper::NoWrapper => {
+            debug!("Processes will be launched without a wrapper");
         }
     }
 
@@ -398,8 +422,8 @@ fn main() -> anyhow::Result<()> {
                     let mut bot_folder = base_folder();
                     bot_folder.push("bots");
                     bot_folder.push(&cfg.name);
-                    let bot_definition = toml::from_slice::<BotDefinition>(
-                        read(bot_folder.join("bot.toml"))
+                    let bot_definition = toml::from_str::<BotDefinition>(
+                        read_to_string(bot_folder.join("bot.toml"))
                             .with_context(|| {
                                 format!(
                                     "Could not read 'bot.toml' for bot '{}' in: '{}'",
@@ -407,7 +431,7 @@ fn main() -> anyhow::Result<()> {
                                     bot_folder.to_string_lossy(),
                                 )
                             })?
-                            .as_slice(),
+                            .as_str(),
                     )?;
                     if let Some(race) = &cfg.race {
                         if bot_definition.race != Race::Random && &bot_definition.race != race {
@@ -454,7 +478,7 @@ fn main() -> anyhow::Result<()> {
                     tournament_module: bot.tournament_module.map(|s| s.into()),
                     player_name: bot.name.clone(),
                     race: bot.race,
-                    sandbox: sandbox.clone(),
+                    wrapper: wrapper.clone(),
                     bot_binary: bot.binary.clone(),
                 };
                 let tournament_module = bot_setup.tournament_module.clone();
@@ -488,7 +512,7 @@ fn main() -> anyhow::Result<()> {
                         },
                         wmode: matches!(bot.headful, HeadfulMode::On { no_wmode, .. } if !no_wmode),
                         sound: matches!(bot.headful, HeadfulMode::On { no_sound, ..} if !no_sound),
-                        game_speed: if game_config.human_speed { -1 } else { 0 },
+                        game_speed: if game_config.human_speed { -1 } else { 1 },
                     })
                 } else {
                     Box::new(BwHeadless {
@@ -534,28 +558,34 @@ fn main() -> anyhow::Result<()> {
                     "Could not run bwheadless (maybe deleted/blocked by a Virus Scanner?)",
                 )?;
 
+                debug!("Spawned Starcraft with PID: {}", bwapi_child.id());
+
                 let bot_out_log = File::create(bot.log_dir.join("bot_out.log"))?;
                 let bot_err_log = File::create(bot.log_dir.join("bot_err.log"))?;
                 let bot_process = match bot.binary {
                     Binary::Dll(_) => None,
                     Binary::Jar(jar) => {
+                        #[cfg(not(target_os = "windows"))]
+                        anyhow::bail!("Java bots are only supported on Windows currently");
                         let mut cmd =
-                            sandbox.wrap_executable(java_path.as_deref().unwrap_or("java.exe"));
+                            wrapper.wrap_executable(java_path.as_deref().unwrap_or("java.exe"));
                         cmd.arg("-jar").arg(jar);
                         Some(cmd)
                     }
-                    Binary::Exe(exe) => Some(sandbox.wrap_executable(exe)),
+                    Binary::Exe(exe) => Some(wrapper.wrap_executable(exe)),
                 }
                 .map(|ref mut cmd| -> anyhow::Result<Child> {
                     // Wait for server to be ready to accept connections
+                    debug!("Waiting for free slots... ");
                     retry(Fixed::from_millis(100).take(100), || {
                         if game_table_access.has_free_slot() {
                             OperationResult::Ok(())
                         } else {
-                            OperationResult::Retry("Server process not ready")
+                            OperationResult::Retry("BWAPI Server is not ready")
                         }
-                    }).map_err(|e| anyhow!(e))?;
+                    }).map_err(anyhow::Error::msg)?;
 
+                    debug!("Found. Firing up bot...");
                     cmd.current_dir(bot.working_dir);
                     cmd.stdout(bot_out_log);
                     cmd.stderr(bot_err_log);
@@ -563,6 +593,7 @@ fn main() -> anyhow::Result<()> {
                     let mut child = cmd.spawn()?;
 
                     // Wait up to 10 seconds before bailing
+                    debug!("Waiting for bot to take up slot...");
                     retry(Fixed::from_millis(100).take(100), || {
                         let slots_filled = game_table_access.all_slots_filled();
                         if !matches!(bwapi_child.try_wait(), Ok(None)) {
@@ -577,7 +608,8 @@ fn main() -> anyhow::Result<()> {
                             )
                         }
                     })
-                    .map_err(|e| anyhow!(e))?;
+                    .map_err(anyhow::Error::msg)?;
+
                     Ok(child)
                 })
                 .transpose()?;
@@ -586,6 +618,8 @@ fn main() -> anyhow::Result<()> {
                     bot: bot_process,
                 });
             }
+
+            info!("All bots launched, waiting for game to complete");
 
             // Clean up a bit, kill Client bots to prevent them from spamming the slot table
             // They will also print "Client And Server are not compatible" - if different versions of BWAPI are running with multiple clients

@@ -1,5 +1,5 @@
 # Map path - relative to Starcraft
-map = 'maps\BroodWar\SomeMap.scm'
+map = 'maps/BroodWar/aiide/(4)Andromeda.scx'
 
 # Game Type
 # Only Melee is supported currently, it takes a list of bots that should play and their respective name and race override
@@ -12,7 +12,7 @@ map = 'maps\BroodWar\SomeMap.scm'
 game_type = { Melee = [{name = "NitekatT", race = "Protoss"}, {name = "NitekatT"}, {name = "MarineHell"}, {name = "ZergHell"}] }
 
 # Force stop games at this frame (85714 = 1 hour, requires a Tournament Module to be active)
-# time_out_at_frame = 85714
+time_out_at_frame = 85714
 
 # This one will run NiteKatT and ZergHell in a window, so you can observe
 # Known bug: If the game is hosted by a headful bot, it will not be created automatically - you'll have to click 'create'

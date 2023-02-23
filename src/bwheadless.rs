@@ -44,7 +44,7 @@ impl LaunchBuilder for BwHeadless {
         let mut bwapi_ini_file = File::create(&bwapi_ini)?;
         BwapiIni::from(&self.bot_setup).write(&mut bwapi_ini_file)?;
 
-        let mut cmd = self.bot_setup.sandbox.wrap_executable(bwheadless);
+        let mut cmd = self.bot_setup.wrapper.wrap_executable(bwheadless);
         cmd.arg("-e").arg(&self.bot_setup.starcraft_exe);
         if let Some(game_name) = &self.game_name {
             cmd.arg("-g").arg(game_name);
