@@ -1,129 +1,116 @@
 use log::debug;
 use serde::Deserialize;
-use std::fs::{create_dir_all, File};
+use sha2::{Digest, Sha256};
+use std::fs::{create_dir_all, File, OpenOptions};
 use std::io::copy;
 use std::path::{Path, PathBuf};
 
-use anyhow::{ensure, Context};
-use hex_literal::hex;
+use anyhow::ensure;
 use log::info;
-#[cfg(target_os = "windows")]
-use registry::{Hive, Security};
-use sha2::{Digest, Sha256};
 use zip::ZipArchive;
 
-use crate::{base_folder, download_folder, internal_scbw_folder};
+use crate::download_folder;
 
-const SCBW_URL: &str = "http://www.cs.mun.ca/~dchurchill/startcraft/scbw_bwapi440.zip";
-const SCBW_ZIP_HASHES: [[u8; 32]; 2] = [
-    // "Original hash"
-    hex!("C7FB49E6C170270192ABA1610F25105BF077A52E556B7A4E684484079FA9FA93"),
-    // "Hash after 2023-01-25, bwapi.ini was modified
-    hex!("4546155ECFEBD50F72DC407041EC0B65282AEFDF083E58F96C29F55B75EB0C0E"),
-];
-
-#[derive(Deserialize, Debug)]
-pub enum StarCraftInstallation {
-    Search,
+#[derive(Deserialize, Debug, Default)]
+pub enum ComponentConfig {
+    #[default]
+    Locate,
     Internal,
     Path(PathBuf),
 }
 
-impl Default for StarCraftInstallation {
-    fn default() -> Self {
-        #[cfg(target_os = "windows")]
-        return Self::Search;
-        #[cfg(not(target_os = "windows"))]
-        return Self::Internal;
+pub struct ComponentInstallation {
+    pub name: &'static str,
+    pub download_name: &'static str,
+    pub locator: fn() -> anyhow::Result<PathBuf>,
+    pub provider: fn(&Self) -> anyhow::Result<PathBuf>,
+    pub internal_folder: PathBuf,
+    pub download_url: &'static str,
+    pub hashes: &'static [[u8; 32]],
+    pub config: ComponentConfig,
+}
+
+impl ComponentInstallation {
+    pub fn download_and_unzip(&self, skip_zip_root: bool) -> anyhow::Result<bool> {
+        if self.internal_folder.exists() {
+            debug!("Using internal {}", self.name);
+            return Ok(false);
+        }
+        let path = download_folder()?.join(self.download_name);
+        let file = if !verify_hashes(&path, self.hashes)? {
+            info!(
+                "Downloading {} from '{}' to '{}'",
+                self.name,
+                self.download_url,
+                path.to_string_lossy()
+            );
+            let mut file = OpenOptions::new()
+                .write(true)
+                .read(true)
+                .create_new(true)
+                .open(&path)?;
+            let dl_bytes = reqwest::blocking::get(self.download_url)?.copy_to(&mut file)?;
+            debug!("Downloaded {} distribution: {dl_bytes} bytes", self.name);
+            file.sync_data()?;
+            ensure!(
+                verify_hashes(&path, self.hashes)?,
+                "Hash check of downloaded {} failed, aborting!",
+                self.name
+            );
+            file
+        } else {
+            File::open(&path)?
+        };
+        info!(
+            "Unzipping '{}' to '{}'",
+            path.to_string_lossy(),
+            self.internal_folder.to_string_lossy()
+        );
+        let mut zip = ZipArchive::new(file)?;
+        for i in 0..zip.len() {
+            let mut file = zip.by_index(i)?;
+            let outpath = match file.enclosed_name() {
+                Some(path) => self.internal_folder.join(if skip_zip_root {
+                    let mut components = path.components();
+                    components.next();
+                    components.as_path()
+                } else {
+                    path
+                }),
+                None => continue,
+            };
+            if file.is_dir() {
+                create_dir_all(&outpath)?;
+            } else {
+                if let Some(parent) = outpath.parent() {
+                    create_dir_all(parent)?;
+                }
+                copy(&mut file, &mut File::create(outpath)?)?;
+            }
+        }
+        Ok(true)
+    }
+
+    pub fn to_path(&self) -> anyhow::Result<PathBuf> {
+        match &self.config {
+            ComponentConfig::Locate => (self.locator)(),
+            ComponentConfig::Path(path) => Ok(path.clone()),
+            ComponentConfig::Internal => {
+                // info!("{} setup complete", self.name);
+                (self.provider)(self)
+            }
+        }
     }
 }
 
-impl StarCraftInstallation {
-    pub fn ensure_path(&self) -> anyhow::Result<PathBuf> {
-        match self {
-            StarCraftInstallation::Search => Self::locate_starcraft(),
-            StarCraftInstallation::Internal => {
-                let scbw_folder = internal_scbw_folder();
-                if scbw_folder.exists() {
-                    info!("Using internal StarCraft");
-                } else {
-                    let path = download_folder()?.join("scbw_bwapi440.zip");
-                    let file = if !Self::check_scbw_zip_hash(&path)? {
-                        info!(
-                            "Downloading StarCraft 1.16.1 from '{}' to '{}'",
-                            SCBW_URL,
-                            path.to_string_lossy()
-                        );
-                        let mut file = File::create(&path)?;
-                        let dl_bytes = reqwest::blocking::get(SCBW_URL)?.copy_to(&mut file)?;
-                        debug!("Downloaded scbw distribution: {dl_bytes} bytes");
-                        file.sync_data()?;
-                        ensure!(
-                            Self::check_scbw_zip_hash(&path)?,
-                            "Hash check of downloaded SCBW failed, aborting!"
-                        );
-                        file
-                    } else {
-                        File::open(&path)?
-                    };
-
-                    info!(
-                        "Unzipping '{}' to '{}'",
-                        path.to_string_lossy(),
-                        scbw_folder.to_string_lossy()
-                    );
-                    let mut zip = ZipArchive::new(file)?;
-                    for i in 0..zip.len() {
-                        let mut file = zip.by_index(i)?;
-                        let outpath = match file.enclosed_name() {
-                            Some(path) => scbw_folder.join(path),
-                            None => continue,
-                        };
-                        if file.is_dir() {
-                            create_dir_all(&outpath)?;
-                        } else {
-                            if let Some(parent) = outpath.parent() {
-                                create_dir_all(parent)?;
-                            }
-                            copy(&mut file, &mut File::create(outpath)?)?;
-                        }
-                    }
-                    info!("Installing SNP_DirectIP.snp");
-                    copy(
-                        &mut File::open(base_folder().join("SNP_DirectIP.snp"))?,
-                        &mut File::create(scbw_folder.join("SNP_DirectIP.snp"))?,
-                    )?;
-                    info!("SCBW setup complete");
-                }
-                Ok(scbw_folder)
-            }
-            StarCraftInstallation::Path(path) => Ok(path.to_path_buf()),
-        }
-    }
-
-    fn locate_starcraft() -> anyhow::Result<PathBuf> {
-        #[cfg(target_os = "windows")]
-        {
-            Ok(Hive::LocalMachine
-                .open(r"SOFTWARE\Blizzard Entertainment\Starcraft", Security::Read)
-                .context("Could not find Starcraft installation")?
-                .value("InstallPath")?
-                .to_string()
-                .into())
-        }
-        #[cfg(not(target_os = "windows"))]
-        anyhow::bail!("Only supported in Windows")
-    }
-
-    fn check_scbw_zip_hash(file: &Path) -> anyhow::Result<bool> {
-        let mut file = if let Ok(file) = File::open(file) {
-            file
-        } else {
-            return Ok(false);
-        };
-        let mut hasher = Sha256::new();
-        copy(&mut file, &mut hasher)?;
-        let hash = hasher.finalize();
-        Ok(SCBW_ZIP_HASHES.contains(hash.as_ref()))
-    }
+fn verify_hashes(file: &Path, hashes: &[[u8; 32]]) -> anyhow::Result<bool> {
+    let mut file = if let Ok(file) = File::open(file) {
+        file
+    } else {
+        return Ok(false);
+    };
+    let mut hasher = Sha256::new();
+    copy(&mut file, &mut hasher)?;
+    let hash = hasher.finalize();
+    Ok(hashes.contains(hash.as_ref()))
 }

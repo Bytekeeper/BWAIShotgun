@@ -21,7 +21,9 @@ use crate::bwapi::{AutoMenu, BwapiConnectMode, BwapiIni, BwapiVersion, GameTable
 use crate::bwheadless::{BwHeadless, BwHeadlessConnectMode};
 use crate::cli::Cli;
 use crate::injectory::{Injectory, InjectoryConnectMode};
-use crate::setup::StarCraftInstallation;
+use crate::java_setup::{java_component, java_default_config};
+use crate::setup::ComponentConfig;
+use crate::starcraft_setup::{starcraft_component, starcraft_default_config};
 use crate::wrapper::ExecutionWrapper;
 
 mod botsetup;
@@ -29,14 +31,17 @@ mod bwapi;
 mod bwheadless;
 mod cli;
 mod injectory;
+mod java_setup;
 mod setup;
+mod starcraft_setup;
 mod wrapper;
 
 #[derive(Deserialize, Debug, Default)]
 struct ShotgunConfig {
-    #[serde(default)]
-    starcraft_path: StarCraftInstallation,
-    java_path: Option<String>,
+    #[serde(default = "starcraft_default_config")]
+    starcraft_path: ComponentConfig,
+    #[serde(default = "java_default_config")]
+    java_path: ComponentConfig,
     #[serde(default)]
     wrapper: ExecutionWrapper,
 }
@@ -191,9 +196,6 @@ pub fn base_folder() -> PathBuf {
 pub fn tools_folder() -> PathBuf {
     base_folder().join("tools")
 }
-pub fn internal_scbw_folder() -> PathBuf {
-    base_folder().join("scbw")
-}
 
 pub fn download_folder() -> anyhow::Result<PathBuf> {
     let download_folder = base_folder().join("download");
@@ -225,6 +227,7 @@ impl PreparedBot {
         definition: &BotDefinition,
     ) -> anyhow::Result<Self> {
         let bwapi_data_path = path.join("bwapi-data");
+        #[allow(unused_mut)]
         let mut ai_module_path = bwapi_data_path.components();
         // Workaround BWAPI 3.7.x "strangeness" of removing ":" ..., we'll do it for windows only
         // for obvious reasons
@@ -345,8 +348,9 @@ fn main() -> anyhow::Result<()> {
         warn!("'shotgun.toml' not found, using defaults");
         ShotgunConfig::default()
     };
-    let starcraft_path = starcraft_path.ensure_path()?;
+    let starcraft_path = starcraft_component(starcraft_path).to_path()?;
     let starcraft_exe = starcraft_path.join("StarCraft.exe");
+    let java_component = java_component(java_path);
 
     ensure!(
         starcraft_exe.exists(),
@@ -367,7 +371,7 @@ fn main() -> anyhow::Result<()> {
             std::process::Command::new("wineserver")
                 .arg("-p")
                 .spawn()
-                .expect("Could not launch wine server successfully");
+                .with_context(|| "Could not launch wine server successfully")?;
         }
         ExecutionWrapper::Sandboxie { .. } => {
             anyhow::bail!("Sandboxie support is WIP. Please use a sandbox or virtual machine for BWAIShotgun itself for now.");
@@ -512,7 +516,7 @@ fn main() -> anyhow::Result<()> {
                         },
                         wmode: matches!(bot.headful, HeadfulMode::On { no_wmode, .. } if !no_wmode),
                         sound: matches!(bot.headful, HeadfulMode::On { no_sound, ..} if !no_sound),
-                        game_speed: if game_config.human_speed { -1 } else { 1 },
+                        game_speed: if game_config.human_speed { -1 } else { 0 },
                     })
                 } else {
                     Box::new(BwHeadless {
@@ -565,10 +569,8 @@ fn main() -> anyhow::Result<()> {
                 let bot_process = match bot.binary {
                     Binary::Dll(_) => None,
                     Binary::Jar(jar) => {
-                        #[cfg(not(target_os = "windows"))]
-                        anyhow::bail!("Java bots are only supported on Windows currently");
                         let mut cmd =
-                            wrapper.wrap_executable(java_path.as_deref().unwrap_or("java.exe"));
+                            wrapper.wrap_executable(java_component.to_path()?);
                         cmd.arg("-jar").arg(jar);
                         Some(cmd)
                     }
