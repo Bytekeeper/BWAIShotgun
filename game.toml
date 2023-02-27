@@ -16,7 +16,7 @@ time_out_at_frame = 85714
 
 # This one will run NiteKatT and ZergHell in a window, so you can observe
 # Known bug: If the game is hosted by a headful bot, it will not be created automatically - you'll have to click 'create'
-#game_type = { Melee = [{name = "NitekatT", race = "Protoss", headful = true}, {name = "MarineHell"}, {name = "ZergHell", headful = true}] }
+#game_type = { Melee = [{name = "NitekatT", race = "Protoss", headful = true}, {name = "MarineHell"}, {name = "ZergHell", headful = { On = {} }}] }
 
 # Want to join the fray? Uncomment this and open a game
 # human_host = true

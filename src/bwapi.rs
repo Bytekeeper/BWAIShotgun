@@ -1,10 +1,15 @@
 use crate::botsetup::BotSetup;
-use crate::{tools_folder, Binary, Race};
+#[cfg(not(target_os = "windows"))]
+use crate::tools_folder;
+use crate::{Binary, Race};
+#[cfg(not(target_os = "windows"))]
 use anyhow::Context;
 use game_table::GameTable;
+#[cfg(not(target_os = "windows"))]
 use log::trace;
 use std::io::Write;
 use std::path::PathBuf;
+#[cfg(not(target_os = "windows"))]
 use std::process::{Command, Stdio};
 
 pub struct GameTableAccess {
@@ -34,9 +39,14 @@ impl GameTableAccess {
                 .output()
                 .context("Executing game_table.exe with wine")
                 .expect("Unable to execute game_table.exe with wine");
-            let res = serde_json::from_slice(&output.stdout).ok();
-            trace!("{res:?}");
-            res
+            if output.stdout.len() == std::mem::size_of::<GameTable>() {
+                let res: GameTable =
+                    unsafe { std::ptr::read_unaligned(output.stdout.as_slice().as_ptr().cast()) };
+                trace!("{res:?}");
+                Some(res)
+            } else {
+                None
+            }
         }
     }
 
@@ -148,6 +158,13 @@ impl BwapiIni {
         if let Some(tm) = &self.tm_module {
             writeln!(out, "tournament = {}", tm.to_string_lossy())?;
         }
+        writeln!(out, "[config]")?;
+        writeln!(out, "holiday = OFF")?;
+        // writeln!(out, "console_attach_on_startup = FALSE")?;
+        // writeln!(out, "console_alloc_on_startup = FALSE")?;
+        // writeln!(out, "console_attach_auto = TRUE")?;
+        // writeln!(out, "console_alloc_auto = TRUE")?;
+
         writeln!(out, "[auto_menu]")?;
         match &self.auto_menu {
             AutoMenu::Unused => (),
@@ -182,7 +199,8 @@ impl BwapiIni {
         writeln!(out, "[starcraft]")?;
         writeln!(out, "speed_override = {}", self.game_speed)?;
         let sound = if self.sound { "ON" } else { "OFF" };
-        writeln!(out, "sound = {sound}")
+        writeln!(out, "sound = {sound}")?;
+        writeln!(out, "drop_players = ON")
     }
 }
 

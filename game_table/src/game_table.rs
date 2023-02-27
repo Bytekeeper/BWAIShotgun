@@ -1,10 +1,12 @@
+#[cfg(target_os = "windows")]
 use log::debug;
-use serde::{Deserialize, Serialize};
+#[cfg(target_os = "windows")]
 use shared_memory::*;
+#[cfg(target_os = "windows")]
 use std::mem::size_of;
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug)]
 pub struct GameInstance {
     pub server_process_id: u32,
     pub is_connected: bool,
@@ -12,11 +14,12 @@ pub struct GameInstance {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug)]
 pub struct GameTable {
     pub game_instances: [GameInstance; 8],
 }
 
+#[cfg(target_os = "windows")]
 pub struct GameTableAccess {
     game_table: Option<Shmem>,
 }
