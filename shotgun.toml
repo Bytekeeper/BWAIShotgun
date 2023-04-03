@@ -10,3 +10,7 @@
 
 # Java executable to use for java bots
 # java_path = '...\java.exe'
+
+# Replay path for each bot to use (relative to bot folder)
+# See BWAPI documentation for the format. 
+# replay_path = "replays/$Y $b $d/%MAP%_%BOTRACE%%ALLYRACES%vs%ENEMYRACES%_$H$M$S.rep"

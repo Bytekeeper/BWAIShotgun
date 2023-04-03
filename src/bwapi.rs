@@ -45,6 +45,10 @@ impl GameTableAccess {
                 trace!("{res:?}");
                 Some(res)
             } else {
+                trace!(
+                    "Expected game table, got: {} ",
+                    String::from_utf8_lossy(&output.stdout)
+                );
                 None
             }
         }
@@ -137,6 +141,7 @@ pub struct BwapiIni {
     pub tm_module: Option<PathBuf>,
     // default: 0 - full throttle
     pub game_speed: i32,
+    pub replay_path: Option<String>,
     pub sound: bool,
     pub auto_menu: AutoMenu,
 }
@@ -149,6 +154,7 @@ impl BwapiIni {
                 Binary::Exe(_) | Binary::Jar(_) => "".to_string(),
             },
             tm_module: bot_setup.tournament_module.clone(),
+            replay_path: bot_setup.replay_path.clone(),
             ..Default::default()
         }
     }
@@ -160,10 +166,6 @@ impl BwapiIni {
         }
         writeln!(out, "[config]")?;
         writeln!(out, "holiday = OFF")?;
-        // writeln!(out, "console_attach_on_startup = FALSE")?;
-        // writeln!(out, "console_alloc_on_startup = FALSE")?;
-        // writeln!(out, "console_attach_auto = TRUE")?;
-        // writeln!(out, "console_alloc_auto = TRUE")?;
 
         writeln!(out, "[auto_menu]")?;
         match &self.auto_menu {
@@ -194,7 +196,11 @@ impl BwapiIni {
         }
         writeln!(
             out,
-            "save_replay = replays/$Y $b $d/%MAP%_%BOTRACE%%ALLYRACES%vs%ENEMYRACES%_$H$M$S.rep"
+            "save_replay = {}",
+            self.replay_path
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or("replays/$Y $b $d/%MAP%_%BOTRACE%%ALLYRACES%vs%ENEMYRACES%_$H$M$S.rep")
         )?;
         writeln!(out, "[starcraft]")?;
         writeln!(out, "speed_override = {}", self.game_speed)?;

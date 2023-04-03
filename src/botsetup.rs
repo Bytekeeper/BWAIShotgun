@@ -19,6 +19,7 @@ pub struct BotSetup {
     pub tournament_module: Option<PathBuf>,
     pub race: Race,
     pub wrapper: ExecutionWrapper,
+    pub replay_path: Option<String>,
 }
 
 #[derive(Clone, Debug)]

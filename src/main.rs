@@ -44,6 +44,7 @@ struct ShotgunConfig {
     java_path: ComponentConfig,
     #[serde(default)]
     wrapper: ExecutionWrapper,
+    replay_path: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Copy, Debug)]
@@ -89,6 +90,9 @@ pub struct GameConfig {
     #[serde(default = "default_latency")]
     pub latency_frames: u32,
     pub time_out_at_frame: Option<u32>,
+    // Configured by CLI or shotgun.toml, not the game config
+    #[serde(skip)]
+    pub replay_path: Option<String>,
 }
 
 fn default_latency() -> u32 {
@@ -342,6 +346,7 @@ fn main() -> anyhow::Result<()> {
         starcraft_path,
         java_path,
         wrapper,
+        replay_path,
     } = if let Ok(cfg) = read_to_string(base_folder().join("shotgun.toml")) {
         toml::from_str(cfg.as_str()).context("'shotgun.toml' is invalid")?
     } else {
@@ -383,10 +388,8 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    let game_config: Result<GameConfig, cli::Error> = cli.try_into();
-    let game_config = match game_config {
-        Ok(game_config) => game_config,
-        Err(cli::Error::NoArguments) => GameConfig::load(&starcraft_path)?,
+    let game_config = match cli.merge_into(GameConfig::load(&starcraft_path)?) {
+        Ok(config) => config,
         Err(cli::Error::ClapError(err)) => err.exit(),
     };
 
@@ -484,6 +487,11 @@ fn main() -> anyhow::Result<()> {
                     race: bot.race,
                     wrapper: wrapper.clone(),
                     bot_binary: bot.binary.clone(),
+                    replay_path: game_config
+                        .replay_path
+                        .as_ref()
+                        .or_else(|| replay_path.as_ref())
+                        .cloned(),
                 };
                 let tournament_module = bot_setup.tournament_module.clone();
                 let bwapi_launcher: Box<dyn LaunchBuilder> = if !matches!(

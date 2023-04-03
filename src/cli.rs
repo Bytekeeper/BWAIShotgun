@@ -23,47 +23,49 @@ pub struct Cli {
     #[clap(subcommand)]
     game_type: Option<GameType>,
     #[arg(short = 's', long)]
-    human_speed: bool,
+    human_speed: Option<bool>,
+    /// Folder/File name to use for replays
+    #[arg(long)]
+    replay_path: Option<String>,
 }
 
 pub enum Error {
-    NoArguments,
     ClapError(clap::Error),
 }
 
-impl TryFrom<Cli> for GameConfig {
-    type Error = Error;
-
-    fn try_from(cli: Cli) -> Result<Self, Self::Error> {
-        if cli.map.is_none() && cli.game_type.is_none() {
-            Err(Error::NoArguments)
-        } else if cli.map.is_some() != cli.game_type.is_some() {
+impl Cli {
+    pub fn merge_into(self, mut config: GameConfig) -> Result<GameConfig, Error> {
+        if self.map.is_some() != self.game_type.is_some() {
             Err(Error::ClapError(clap::Error::raw(
                 ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand,
-                "Either no or all arguments are required. Use '-h' to get help.\n",
+                "Map and game type must either be both set, or not at all. Use '-h' to get help.\n",
             )))
         } else {
-            let game_type = match cli.game_type.as_ref().expect("Game Type not set") {
-                GameType::Melee { bots } | GameType::Human { bots } => crate::GameType::Melee(
-                    bots.iter()
-                        .map(|name| BotLaunchConfig {
-                            name: name.to_string(),
-                            player_name: None,
-                            race: None,
-                            headful: HeadfulMode::Off,
-                        })
-                        .collect(),
-                ),
-            };
-            Ok(GameConfig {
-                map: cli.map,
-                game_name: None,
-                game_type,
-                human_host: matches!(cli.game_type.unwrap(), GameType::Human { .. }),
-                human_speed: cli.human_speed,
-                latency_frames: 3,
-                time_out_at_frame: None,
-            })
+            if let Some(game_type) = self.game_type {
+                config.human_host = matches!(game_type, GameType::Human { .. });
+                config.game_type = match game_type {
+                    GameType::Melee { bots } | GameType::Human { bots } => crate::GameType::Melee(
+                        bots.iter()
+                            .map(|name| BotLaunchConfig {
+                                name: name.to_string(),
+                                player_name: None,
+                                race: None,
+                                headful: HeadfulMode::Off,
+                            })
+                            .collect(),
+                    ),
+                };
+            }
+            if let Some(map) = self.map {
+                config.map = Some(map);
+            }
+            if let Some(human_speed) = self.human_speed {
+                config.human_speed = human_speed;
+            }
+            if let Some(replay_path) = self.replay_path {
+                config.replay_path = Some(replay_path);
+            }
+            Ok(config)
         }
     }
 }
