@@ -22,7 +22,7 @@ crc = "3.0"
 sha2 = "0.10"
 log = "0.4"
 simplelog = "0.12"
-hex-literal = "0.3.4"
+hex-literal = "0.4"
 game_table = { path = "game_table" }
 
 [target.'cfg(not(windows))'.dependencies]
