@@ -6,7 +6,7 @@ use crate::{Binary, Race};
 use anyhow::Context;
 use game_table::GameTable;
 #[cfg(not(target_os = "windows"))]
-use log::trace;
+use log::{debug, trace};
 use std::io::Write;
 use std::path::PathBuf;
 #[cfg(not(target_os = "windows"))]
@@ -32,8 +32,12 @@ impl GameTableAccess {
         }
         #[cfg(not(target_os = "windows"))]
         {
+            let game_table_path = tools_folder().join("game_table.exe");
+            if !game_table_path.exists() {
+                panic!("Missing '{}'", game_table_path.display());
+            }
             let output = Command::new("wine")
-                .arg(tools_folder().join("game_table.exe"))
+                .arg(game_table_path)
                 .stdin(Stdio::null())
                 .stderr(Stdio::null())
                 .output()
@@ -74,7 +78,10 @@ impl GameTableAccess {
                     .iter()
                     .any(|it| it.server_process_id != 0 && !it.is_connected)
             })
-            .unwrap_or(false)
+            .unwrap_or_else(|| {
+                debug!("No game table found");
+                false
+            })
     }
 }
 

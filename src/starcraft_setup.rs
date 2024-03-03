@@ -16,7 +16,7 @@ pub fn starcraft_component(config: ComponentConfig) -> ComponentInstallation {
     ComponentInstallation {
         name: "Starcraft 1.16.1",
         download_name: "scbw_bwapi440.zip",
-        download_url: "http://www.cs.mun.ca/~dchurchill/startcraft/scbw_bwapi440.zip",
+        download_url: "http://www.cs.mun.ca/~dchurchill/starcraftaicomp/files/Starcraft_1161.zip",
         locator: locate_starcraft,
         config,
         hashes: &[
@@ -24,6 +24,8 @@ pub fn starcraft_component(config: ComponentConfig) -> ComponentInstallation {
             hex!("C7FB49E6C170270192ABA1610F25105BF077A52E556B7A4E684484079FA9FA93"),
             // "Hash after 2023-01-25, bwapi.ini was modified
             hex!("4546155ECFEBD50F72DC407041EC0B65282AEFDF083E58F96C29F55B75EB0C0E"),
+            // TODO what changed here
+            hex!("1B9F0BF5B719C59EC44563BA0DF834BFC7087332315D7A9E67B0731268AE90DC"),
         ],
         internal_folder: base_folder().join("scbw"),
         provider: provide_starcraft,

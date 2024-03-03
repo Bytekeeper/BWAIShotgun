@@ -1,5 +1,5 @@
 # Map path - relative to Starcraft
-map = 'maps/BroodWar/aiide/(4)Andromeda.scx'
+map = 'maps/BroodWar/AIIDE/(4)Andromeda.scx'
 
 # Game Type
 # Only Melee is supported currently, it takes a list of bots that should play and their respective name and race override

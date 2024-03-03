@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{anyhow, ensure, Context};
 use clap::Parser;
 use crc::{Crc, CRC_32_ISO_HDLC};
-use log::{debug, info, warn, LevelFilter};
+use log::{debug, error, info, warn, LevelFilter};
 use retry::delay::Fixed;
 use retry::{retry, OperationResult};
 use serde::de::Unexpected;
@@ -595,10 +595,10 @@ fn main() -> anyhow::Result<()> {
                         }
                     }).map_err(anyhow::Error::msg)?;
 
-                    debug!("Found. Firing up bot...");
                     cmd.current_dir(bot.working_dir);
                     cmd.stdout(bot_out_log);
                     cmd.stderr(bot_err_log);
+                    debug!("Found. Firing up bot... '{:?}'", cmd);
 
                     let mut child = cmd.spawn()?;
 
@@ -606,11 +606,33 @@ fn main() -> anyhow::Result<()> {
                     debug!("Waiting for bot to take up slot...");
                     retry(Fixed::from_millis(100).take(100), || {
                         let slots_filled = game_table_access.all_slots_filled();
-                        if !matches!(bwapi_child.try_wait(), Ok(None)) {
-                            OperationResult::Err("BWAPI process died")
-                        } else if !matches!(child.try_wait(), Ok(None)) {
-                            OperationResult::Err("Bot process died")
-                        } else if slots_filled {
+                        match bwapi_child.try_wait() {
+                            Ok(None) => {
+                                // Ok, continue
+                            },
+                            Ok(Some(code)) => {
+                                error!("Starcraft died with: {}", code);
+                                return OperationResult::Err("BWAPI process died");
+                            }
+                            Err(e) => {
+                                error!("Error waiting for BWAPI process: {e}");
+                                return OperationResult::Err("Could not wait for BWAPI process");
+                            }
+                        }
+                        match child.try_wait() {
+                            Ok(None) => {
+                                // Ok, continue
+                            },
+                            Ok(Some(code)) => {
+                                error!("Bot process died with: {}", code);
+                                return OperationResult::Err("Bot process died")
+                            }
+                            Err(e) => {
+                                error!("Error waiting for bot process: {e}");
+                                return OperationResult::Err("Could not wait for bot process");
+                            }
+                        }
+                        if slots_filled {
                             OperationResult::Ok(())
                         } else {
                             OperationResult::Retry(

@@ -44,11 +44,8 @@ impl ComponentInstallation {
                 self.download_url,
                 path.to_string_lossy()
             );
-            let mut file = OpenOptions::new()
-                .write(true)
-                .read(true)
-                .create_new(true)
-                .open(&path)?;
+            // File not there or hash failed -> redownload
+            let mut file = OpenOptions::new().write(true).read(true).open(&path)?;
             let dl_bytes = reqwest::blocking::get(self.download_url)?.copy_to(&mut file)?;
             debug!("Downloaded {} distribution: {dl_bytes} bytes", self.name);
             file.sync_data()?;
@@ -93,7 +90,13 @@ impl ComponentInstallation {
 
     pub fn to_path(&self) -> anyhow::Result<PathBuf> {
         match &self.config {
-            ComponentConfig::Locate => (self.locator)(),
+            ComponentConfig::Locate => (self.locator)().or_else(|_| {
+                info!(
+                    "Could not find {} - falling back to internal installation",
+                    self.name
+                );
+                (self.provider)(self)
+            }),
             ComponentConfig::Path(path) => Ok(path.clone()),
             ComponentConfig::Internal => {
                 // info!("{} setup complete", self.name);
