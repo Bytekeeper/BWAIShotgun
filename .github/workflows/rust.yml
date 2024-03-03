@@ -17,7 +17,7 @@ jobs:
     steps:  
     - run: sudo apt-get install mingw-w64
     - run: rustup target add i686-pc-windows-gnu
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: Build
       run: make
     - run: 7za a -- bwaishotgun-linux.7z target/x86_64-unknown-linux-gnu/release/bwaishotgun target/i686-pc-windows-gnu/release/game_table.exe bots tools tm SNP_DirectIP.snp game.toml shotgun.toml
