@@ -27,3 +27,52 @@ jobs:
       uses: actions/upload-artifact@v3
       with:
         path: bwaishotgun-linux.7z
+
+  build-win:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v1
+
+      - name: Install latest rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          default: true
+          override: true
+
+      - name: Build for Windows
+        run: make
+      - run: 7za a -- bwaishotgun-linux.7z target/release/bwaishotgun.exe bots tools tm SNP_DirectIP.snp game.toml shotgun.toml
+      - run: 7za rn -- bwaishotgun-linux.7z target/release/bwaishotgun.exe BWAIShotgun.exe
+      - name: 'Upload Release Candidate'
+        uses: actions/upload-artifact@v3
+        with:
+          path: bwaishotgun-windows.7z
+
+  build-mac:
+   runs-on: macos-latest
+
+   steps:
+      - name: Checkout
+        uses: actions/checkout@v1
+
+      - name: Install latest rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: x86_64-apple-darwin
+          default: true
+          override: true
+
+      - name: Build for Mac
+        run: make
+      - run: 7za a -- bwaishotgun-mac.7z target/release/bwaishotgun target/i686-pc-windows-gnu/release/game_table.exe bots tools tm SNP_DirectIP.snp game.toml shotgun.toml
+      - run: 7za rn -- bwaishotgun-mac.7z target/release/bwaishotgun BWAIShotgun
+      - run: 7za rn -- bwaishotgun-mac.7z target/i686-pc-windows-gnu/release/game_table.exe tools/game_table.exe
+
+      - name: 'Upload Release Candidate'
+        uses: actions/upload-artifact@v3
+        with:
+          path: bwaishotgun-mac.7z
